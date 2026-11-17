@@ -8,7 +8,6 @@ from telegram import ReplyKeyboardRemove, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ...config import config
 from ...constants import (
     MAX_BUTTON_TEXT_LENGTH,
     MAX_EXTRA_BUTTONS,
@@ -23,8 +22,7 @@ from ...constants import (
     POST_TEXT,
     Msg,
 )
-from ...database import db
-from ...decorators import admin_only
+from ...decorators import workspace_access
 from ...keyboards import (
     POST_CANCEL_INLINE,
     input_back_keyboard,
@@ -43,7 +41,6 @@ from ...utils import (
     go_to_main_menu,
     normalize_photo_url,
     register_panel_message,
-    track_user,
 )
 
 from .common import (
@@ -69,13 +66,46 @@ def _extract_photo_url_from_message(message) -> tuple[str | None, str]:
     return normalize_photo_url(raw_text)
 
 
-@admin_only
+def _ensure_post_saved(ws_db: Any, pb: Dict[str, Any], user_id: int) -> int:
+    """پست را فقط هنگام انتشار، تحویل در پی‌وی یا ذخیره و پایان در دیتابیس ثبت می‌کند."""
+    post_id = pb.get("post_id")
+    buttons_json = serialize_buttons(pb.get("buttons"))
+    if post_id is None:
+        post_id = ws_db.create_post(
+            post_text=pb["text"],
+            entities_json=pb["entities_json"],
+            photo_url=pb["photo_url"],
+            created_by=user_id,
+            show_above_text=pb["show_above_text"],
+            prefer_large_media=pb["prefer_large_media"],
+            buttons_json=buttons_json,
+        )
+        pb["post_id"] = post_id
+    else:
+        ws_db.update_post(
+            post_id,
+            post_text=pb["text"],
+            entities_json=pb["entities_json"],
+            photo_url=pb["photo_url"],
+            show_above_text=pb["show_above_text"],
+            prefer_large_media=pb["prefer_large_media"],
+            buttons_json=buttons_json,
+        )
+    return int(post_id)
+
+
+@workspace_access
 async def start_post_builder(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    track_user(update)
+    ws_id = context.user_data["_ws_id"]
+    ws_role = context.user_data["_ws_role"]
+    ws_db = context.user_data["_ws_db"]
     context.user_data.clear()
+    context.user_data["_ws_id"] = ws_id
+    context.user_data["_ws_role"] = ws_role
+    context.user_data["_ws_db"] = ws_db
 
     await update.message.reply_text(
         Msg.POST_START_NOTICE,
@@ -91,12 +121,14 @@ async def start_post_builder(
     return POST_TEXT
 
 
-@admin_only
+@workspace_access
 async def receive_post_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
+
     if not message or not message.text or not message.text.strip():
         sent = await message.reply_text(
             Msg.POST_TEXT_INVALID,
@@ -121,8 +153,8 @@ async def receive_post_text(
         "text": text,
         "entities_json": entities_json,
         "photo_url": "",
-        "show_above_text": config.DEFAULT_SHOW_ABOVE_TEXT,
-        "prefer_large_media": config.DEFAULT_PREFER_LARGE_MEDIA,
+        "show_above_text": ws_db.get_show_above_text(),
+        "prefer_large_media": ws_db.get_prefer_large_media(),
         "buttons": [],
         "post_id": None,
         "preview_msg_id": None,
@@ -145,7 +177,7 @@ async def receive_post_text(
     return POST_PHOTO_LINK
 
 
-@admin_only
+@workspace_access
 async def receive_photo_link(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -174,17 +206,8 @@ async def receive_photo_link(
     pb["photo_url"] = photo_url
     await close_question_message(context, message.chat_id, photo_url)
 
-    post_id = db.create_post(
-        post_text=pb["text"],
-        entities_json=pb["entities_json"],
-        photo_url=pb["photo_url"],
-        created_by=update.effective_user.id,
-        show_above_text=pb["show_above_text"],
-        prefer_large_media=pb["prefer_large_media"],
-        buttons_json=serialize_buttons(pb.get("buttons")),
-    )
-    pb["post_id"] = post_id
-
+    # نکته R2: تا پیش از ارسال/تحویل/پایان، رکوردی در دیتابیس ذخیره نمی‌شود
+    # تا لغو کردن هیچ پستی در «پست‌های ذخیره‌شده» باقی نگذارد.
     try:
         await send_or_refresh_preview(context, message.chat_id, pb)
     except TelegramError as exc:
@@ -210,7 +233,8 @@ async def _publish_to_channel(
     channel_id: int,
     user_id: int,
 ) -> tuple[int, str | None]:
-    channel = db.get_target_channel(channel_id)
+    ws_db = context.user_data["_ws_db"]
+    channel = ws_db.get_target_channel(channel_id)
     if not channel:
         return POST_PREVIEW, "❌ کانال مورد نظر پیدا نشد."
 
@@ -229,22 +253,21 @@ async def _publish_to_channel(
         logger.warning("ارسال به کانال %s ناموفق: %s", channel["chat_id"], exc)
         return POST_PREVIEW, Msg.CHANNEL_SEND_FAILED.format(error=exc)
 
-    post_id = pb.get("post_id")
-    if post_id:
-        db.mark_post_published(
-            post_id=post_id,
-            channel_chat_id=channel["chat_id"],
-            channel_message_id=sent.message_id,
-            channel_title=channel.get("title") or "",
-            channel_username=channel.get("username") or "",
-        )
-        db.record_delivery(
-            post_id=post_id,
-            target_type="channel",
-            target_chat_id=channel["chat_id"],
-            message_id=sent.message_id,
-            sent_by=user_id,
-        )
+    post_id = _ensure_post_saved(ws_db, pb, user_id)
+    ws_db.mark_post_published(
+        post_id=post_id,
+        channel_chat_id=channel["chat_id"],
+        channel_message_id=sent.message_id,
+        channel_title=channel.get("title") or "",
+        channel_username=channel.get("username") or "",
+    )
+    ws_db.record_delivery(
+        post_id=post_id,
+        target_type="channel",
+        target_chat_id=channel["chat_id"],
+        message_id=sent.message_id,
+        sent_by=user_id,
+    )
 
     link = build_telegram_message_link(
         channel["chat_id"],
@@ -261,17 +284,19 @@ async def _publish_to_channel(
     except TelegramError:
         pass
 
-    await go_to_main_menu(context, query.message.chat_id)
+    await go_to_main_menu(context, query.message.chat_id, user_id=user_id)
     context.user_data.clear()
     return ConversationHandler.END, "✅ منتشر شد!"
 
 
-@admin_only
+@workspace_access
 async def handle_preview_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
+    user_id = update.effective_user.id
+    ws_db = context.user_data["_ws_db"]
     data = (query.data or "").strip()
     pb: Dict[str, Any] = context.user_data.get("pb") or {}
 
@@ -279,7 +304,7 @@ async def handle_preview_callback(
         await query.answer("🚫 نشست ساخت پست منقضی شده است.", show_alert=True)
         return ConversationHandler.END
 
-    chat_id = query.message.chat_id if query.message else update.effective_user.id
+    chat_id = query.message.chat_id if query.message else user_id
 
     if data == "pb:send_pv":
         try:
@@ -297,14 +322,14 @@ async def handle_preview_callback(
             await query.answer(f"❌ ارسال ناموفق: {exc}", show_alert=True)
             return POST_PREVIEW
 
-        if pb.get("post_id"):
-            db.record_delivery(
-                post_id=pb["post_id"],
-                target_type="pv",
-                target_chat_id=chat_id,
-                message_id=sent.message_id,
-                sent_by=update.effective_user.id,
-            )
+        post_id = _ensure_post_saved(ws_db, pb, user_id)
+        ws_db.record_delivery(
+            post_id=post_id,
+            target_type="pv",
+            target_chat_id=chat_id,
+            message_id=sent.message_id,
+            sent_by=user_id,
+        )
         await query.answer(
             "✅ پست خالص در پی‌وی ارسال شد — می‌توانید فوروارد یا کپی کنید.",
             show_alert=True,
@@ -312,14 +337,14 @@ async def handle_preview_callback(
         return POST_PREVIEW
 
     if data == "pb:send_ch":
-        channels = db.get_target_channels()
+        channels = ws_db.get_target_channels()
         if not channels:
             await query.answer(Msg.NO_CHANNELS_CONFIGURED, show_alert=True)
             return POST_PREVIEW
 
         if len(channels) == 1:
             next_state, alert_text = await _publish_to_channel(
-                context, query, pb, channels[0]["id"], update.effective_user.id
+                context, query, pb, channels[0]["id"], user_id
             )
             await query.answer(
                 alert_text or "",
@@ -344,7 +369,7 @@ async def handle_preview_callback(
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return POST_SELECT_CHANNEL
         next_state, alert_text = await _publish_to_channel(
-            context, query, pb, int(raw_id), update.effective_user.id
+            context, query, pb, int(raw_id), user_id
         )
         await query.answer(
             alert_text or "",
@@ -355,7 +380,7 @@ async def handle_preview_callback(
     if data == "pb:toggle_pos":
         pb["show_above_text"] = not pb["show_above_text"]
         if pb.get("post_id"):
-            db.update_post(
+            ws_db.update_post(
                 pb["post_id"], show_above_text=pb["show_above_text"]
             )
         await query.answer()
@@ -365,7 +390,7 @@ async def handle_preview_callback(
     if data == "pb:toggle_size":
         pb["prefer_large_media"] = not pb["prefer_large_media"]
         if pb.get("post_id"):
-            db.update_post(
+            ws_db.update_post(
                 pb["post_id"], prefer_large_media=pb["prefer_large_media"]
             )
         await query.answer()
@@ -407,7 +432,7 @@ async def handle_preview_callback(
             return POST_PREVIEW
         await query.answer()
         await query.edit_message_text(
-            Msg.POST_ASK_BTN_TEXT.format(default=config.DEFAULT_BUTTON_TEXT),
+            Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
             reply_markup=input_back_keyboard("pb:btns"),
         )
         return POST_ADD_BTN_TEXT
@@ -418,7 +443,7 @@ async def handle_preview_callback(
         if raw_idx.isdigit() and 0 <= int(raw_idx) < len(buttons):
             buttons.pop(int(raw_idx))
             if pb.get("post_id"):
-                db.update_post(
+                ws_db.update_post(
                     pb["post_id"], buttons_json=serialize_buttons(buttons)
                 )
             await query.answer("🗑 دکمه حذف شد.")
@@ -442,12 +467,13 @@ async def handle_preview_callback(
         return POST_PREVIEW
 
     if data == "pb:done":
+        _ensure_post_saved(ws_db, pb, user_id)
         await query.answer()
         try:
             await query.edit_message_text(Msg.POST_DONE)
         except TelegramError:
             pass
-        await go_to_main_menu(context, chat_id)
+        await go_to_main_menu(context, chat_id, user_id=user_id)
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -455,12 +481,13 @@ async def handle_preview_callback(
     return POST_PREVIEW
 
 
-@admin_only
+@workspace_access
 async def receive_edit_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pb: Dict[str, Any] = context.user_data.get("pb") or {}
     if not pb:
         return ConversationHandler.END
@@ -482,7 +509,7 @@ async def receive_edit_text(
     pb["text"] = message.text
     pb["entities_json"] = serialize_entities(message.entities)
     if pb.get("post_id"):
-        db.update_post(
+        ws_db.update_post(
             pb["post_id"],
             post_text=pb["text"],
             entities_json=pb["entities_json"],
@@ -492,12 +519,13 @@ async def receive_edit_text(
     return POST_PREVIEW
 
 
-@admin_only
+@workspace_access
 async def receive_edit_link(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pb: Dict[str, Any] = context.user_data.get("pb") or {}
     if not pb:
         return ConversationHandler.END
@@ -518,25 +546,27 @@ async def receive_edit_link(
 
     pb["photo_url"] = photo_url
     if pb.get("post_id"):
-        db.update_post(pb["post_id"], photo_url=photo_url)
+        ws_db.update_post(pb["post_id"], photo_url=photo_url)
 
     await send_or_refresh_preview(context, message.chat_id, pb)
     await delete_answer_message(context, message)
     return POST_PREVIEW
 
 
-@admin_only
+@workspace_access
 async def receive_btn_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pb: Dict[str, Any] = context.user_data.get("pb") or {}
     if not pb:
         return ConversationHandler.END
 
+    default_label = ws_db.get_default_button_text()
     raw = (message.text or "").strip()
-    label = config.DEFAULT_BUTTON_TEXT if raw == "-" else raw
+    label = default_label if raw == "-" else raw
     if not 1 <= len(label) <= MAX_BUTTON_TEXT_LENGTH:
         await message.reply_text(
             Msg.BTN_LABEL_INVALID,
@@ -554,18 +584,18 @@ async def receive_btn_text(
     return POST_ADD_BTN_URL
 
 
-@admin_only
+@workspace_access
 async def receive_btn_url(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pb: Dict[str, Any] = context.user_data.get("pb") or {}
     if not pb:
         return ConversationHandler.END
 
     url, err = _extract_photo_url_from_message(message)
-    # برای دکمهٔ شیشه‌ای، حتی لینک کانال خصوصی هم به‌عنوان URL عادی مجاز است
     if not url and err == "private":
         raw_text = (message.text or "").strip()
         if raw_text.lower().startswith(("t.me/", "telegram.me/")):
@@ -581,10 +611,10 @@ async def receive_btn_url(
         )
         return POST_ADD_BTN_URL
 
-    label = pb.pop("pending_btn_label", None) or config.DEFAULT_BUTTON_TEXT
+    label = pb.pop("pending_btn_label", None) or ws_db.get_default_button_text()
     pb.setdefault("buttons", []).append({"text": label, "url": url})
     if pb.get("post_id"):
-        db.update_post(
+        ws_db.update_post(
             pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
         )
 

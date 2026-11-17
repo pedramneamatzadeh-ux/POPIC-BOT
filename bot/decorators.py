@@ -4,11 +4,13 @@ from typing import Any, Callable
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from .config import config
 from .constants import Msg
+from .database import registry, resolve_user_workspace
+from .keyboards import main_menu_for
 
 
-def owner_only(func: Callable[..., Any]) -> Callable[..., Any]:
+def workspace_owner_only(func: Callable[..., Any]) -> Callable[..., Any]:
+    """فقط زمانی اجازه می‌دهد که کاربر در فضای شخصی خودش (حالت مالک) باشد."""
     @wraps(func)
     async def wrapper(
         update: Update,
@@ -17,23 +19,41 @@ def owner_only(func: Callable[..., Any]) -> Callable[..., Any]:
         **kwargs: Any,
     ) -> Any:
         user = update.effective_user
+        if not user:
+            return ConversationHandler.END
 
-        if not user or config.OWNER_ID is None or user.id != config.OWNER_ID:
+        registry.save_or_update_user(
+            user.id, user.username, user.first_name, user.last_name
+        )
+        ws_id, status, ws_db = resolve_user_workspace(user.id)
+
+        if status == "revoked_to_owner":
             if update.message:
-                await update.message.reply_text(Msg.ACCESS_DENIED)
+                await update.message.reply_text(
+                    Msg.ROLE_REVOKED_NOTICE,
+                    reply_markup=main_menu_for(user.id),
+                )
+
+        if status == "admin" or ws_id != user.id:
+            if update.message:
+                await update.message.reply_text(Msg.OWNER_ONLY_FEATURE)
             elif update.callback_query:
                 await update.callback_query.answer(
-                    Msg.ACCESS_DENIED,
+                    Msg.OWNER_ONLY_FEATURE,
                     show_alert=True,
                 )
             return ConversationHandler.END
 
+        context.user_data["_ws_id"] = ws_id
+        context.user_data["_ws_role"] = "owner"
+        context.user_data["_ws_db"] = ws_db
         return await func(update, context, *args, **kwargs)
 
     return wrapper
 
 
-def admin_only(func: Callable[..., Any]) -> Callable[..., Any]:
+def workspace_access(func: Callable[..., Any]) -> Callable[..., Any]:
+    """دسترسی عمومی ربات — فضای کاری فعال کاربر (مالک یا ادمین مجاز) را آماده می‌کند."""
     @wraps(func)
     async def wrapper(
         update: Update,
@@ -42,22 +62,30 @@ def admin_only(func: Callable[..., Any]) -> Callable[..., Any]:
         **kwargs: Any,
     ) -> Any:
         user = update.effective_user
-
-        allowed = bool(user) and (
-            user.id in config.ADMIN_IDS
-            or user.id == config.OWNER_ID
-        )
-
-        if not allowed:
-            if update.message:
-                await update.message.reply_text(Msg.ACCESS_DENIED)
-            elif update.callback_query:
-                await update.callback_query.answer(
-                    Msg.ACCESS_DENIED,
-                    show_alert=True,
-                )
+        if not user:
             return ConversationHandler.END
 
+        registry.save_or_update_user(
+            user.id, user.username, user.first_name, user.last_name
+        )
+        ws_id, status, ws_db = resolve_user_workspace(user.id)
+
+        if status == "revoked_to_owner":
+            if update.message:
+                await update.message.reply_text(
+                    Msg.ROLE_REVOKED_NOTICE,
+                    reply_markup=main_menu_for(user.id),
+                )
+            elif update.callback_query:
+                await update.callback_query.answer(
+                    Msg.ROLE_REVOKED_NOTICE,
+                    show_alert=True,
+                )
+                return ConversationHandler.END
+
+        context.user_data["_ws_id"] = ws_id
+        context.user_data["_ws_role"] = "admin" if status == "admin" else "owner"
+        context.user_data["_ws_db"] = ws_db
         return await func(update, context, *args, **kwargs)
 
     return wrapper

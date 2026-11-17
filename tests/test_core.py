@@ -7,10 +7,16 @@ from types import SimpleNamespace
 from telegram import MessageEntity
 
 import main as app_main
-from bot.application import build_application
-from bot.config import Config, config
+from bot.application import create_application
+from bot.config import config
 from bot.constants import BOT_VERSION, BOT_VERSION_DATE
-from bot.database import Database, db
+from bot.database import (
+    Database,
+    clear_workspace_cache,
+    get_workspace_db,
+    registry,
+    resolve_user_workspace,
+)
 from bot.services.publisher import (
     build_buttons_markup,
     build_link_preview_options,
@@ -31,56 +37,82 @@ from bot.utils import (
 class CoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self._db_path = os.path.join(self._tmp.name, "test.db")
         self._orig_token = config.BOT_TOKEN
         self._orig_owner = config.OWNER_ID
-        self._orig_admins = list(config.ADMIN_IDS)
-        self._orig_db_path = db.path
+        self._orig_data = config.DATA_DIR
+        self._orig_reg = config.REGISTRY_DB_PATH
+        self._orig_ws = config.WORKSPACES_DIR
+        self._orig_reg_path = registry.path
+
         config.BOT_TOKEN = "123456:TEST_TOKEN"
-        config.OWNER_ID = 999999
-        config.ADMIN_IDS = []
-        db.path = self._db_path
+        config.OWNER_ID = None
+        config.DATA_DIR = os.path.join(self._tmp.name, "data")
+        config.REGISTRY_DB_PATH = os.path.join(config.DATA_DIR, "registry.db")
+        config.WORKSPACES_DIR = os.path.join(config.DATA_DIR, "workspaces")
+        registry.path = config.REGISTRY_DB_PATH
+        clear_workspace_cache()
+        registry.init()
 
     def tearDown(self) -> None:
         config.BOT_TOKEN = self._orig_token
         config.OWNER_ID = self._orig_owner
-        config.ADMIN_IDS = self._orig_admins
-        db.path = self._orig_db_path
+        config.DATA_DIR = self._orig_data
+        config.REGISTRY_DB_PATH = self._orig_reg
+        config.WORKSPACES_DIR = self._orig_ws
+        registry.path = self._orig_reg_path
+        clear_workspace_cache()
         self._tmp.cleanup()
 
-    def test_build_application_handlers(self) -> None:
-        app = build_application()
+    def test_create_application_handlers(self) -> None:
+        app = create_application()
         self.assertIn(-1, app.handlers)
         self.assertIn(0, app.handlers)
-        # group 0: /start + 4 conversations + backup + stale_callback_answer = 7
-        self.assertEqual(len(app.handlers[0]), 7)
+        # group 0: /start + ws_pick + switch_btn + 4 convs + backup = 8
+        self.assertEqual(len(app.handlers[0]), 8)
+        self.assertEqual(len(app.handlers[1]), 1)
         self.assertTrue(len(app.error_handlers) >= 1)
 
-    def test_preflight_owner_only(self) -> None:
-        self.assertTrue(app_main.preflight())
-        test_db = Database(self._db_path)
-        with test_db.connect() as conn:
+    def test_preflight_works_without_owner_id(self) -> None:
+        config.OWNER_ID = None
+        app_main.preflight()
+        self.assertTrue(os.path.isdir(config.DATA_DIR))
+        self.assertTrue(os.path.isdir(config.WORKSPACES_DIR))
+        ws_db = get_workspace_db(101)
+        with ws_db.connect() as conn:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode.lower(), "wal")
 
-    def test_preflight_missing_owner_fails(self) -> None:
-        config.OWNER_ID = None
-        self.assertFalse(app_main.preflight())
+    def test_workspace_isolation_and_revocation(self) -> None:
+        registry.save_or_update_user(100, "owner", "Ali", "")
+        registry.save_or_update_user(200, "admin", "Sara", "")
+        db_100 = get_workspace_db(100)
+        db_200 = get_workspace_db(200)
 
-    def test_config_invalid_admin_tokens(self) -> None:
-        tokens = Config._invalid_admin_tokens("123, abc, 456, -5")
-        self.assertEqual(tokens, ["abc", "-5"])
-        valid = Config._parse_admin_ids("123, abc, 456")
-        self.assertEqual(valid, [123, 456])
+        db_100.set_setting("default_show_above_text", False)
+        self.assertFalse(db_100.get_show_above_text())
+        self.assertTrue(db_200.get_show_above_text())
+        self.assertTrue(config.DEFAULT_SHOW_ABOVE_TEXT)
 
-    def test_database_settings_per_item_filter(self) -> None:
-        test_db = Database(self._db_path)
-        test_db.init()
-        test_db.set_setting("admin_ids", [111, "bad", -2, "222"])
-        self.assertEqual(config.ADMIN_IDS, [111, 222])
+        db_100.create_post("پست مالک", "[]", "https://t.me/pics/1", 100)
+        self.assertEqual(db_100.count_posts(), 1)
+        self.assertEqual(db_200.count_posts(), 0)
+
+        registry.add_workspace_admin(100, 200)
+        registry.set_active_workspace_id(200, 100)
+        ws_id, status, ws_db = resolve_user_workspace(200)
+        self.assertEqual(ws_id, 100)
+        self.assertEqual(status, "admin")
+        self.assertEqual(ws_db.count_posts(), 1)
+
+        # Revoke admin -> automatically falls back to personal owner workspace
+        registry.remove_workspace_admin(100, 200)
+        ws_id, status, ws_db = resolve_user_workspace(200)
+        self.assertEqual(ws_id, 200)
+        self.assertEqual(status, "revoked_to_owner")
+        self.assertEqual(ws_db.count_posts(), 0)
 
     def test_database_channels_and_posts_crud(self) -> None:
-        test_db = Database(self._db_path)
+        test_db = Database(os.path.join(self._tmp.name, "crud.db"))
         test_db.init()
 
         ch_id = test_db.add_target_channel(-100123456, "Anime News", "animenews", 999999)
@@ -201,7 +233,6 @@ class CoreTests(unittest.TestCase):
             build_telegram_message_link(-100123456789, "", 99),
             "https://t.me/c/123456789/99",
         )
-        # 2024-03-19 20:30:00 UTC == 1403/01/01 00:00 Tehran
         dt = datetime(2024, 3, 19, 20, 30, 0, tzinfo=timezone.utc)
         self.assertEqual(fmt_tehran(dt), "1403/01/01 — 00:00")
         self.assertEqual(fmt_tehran(None), "نامشخص")

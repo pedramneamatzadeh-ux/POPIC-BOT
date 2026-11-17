@@ -1,4 +1,4 @@
-"""لغو فلوی ساخت پست با تأیید اینلاین (الگوی R23)."""
+"""لغو فلوی ساخت پست با تأیید اینلاین (بدون ذخیرهٔ پیش‌نویس در دیتابیس)."""
 
 import logging
 
@@ -7,7 +7,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ...constants import Msg
-from ...decorators import admin_only
+from ...decorators import workspace_access
 from ...keyboards import CANCEL_CONFIRM_INLINE, main_menu_for
 from ...utils import go_to_main_menu
 
@@ -16,15 +16,28 @@ logger = logging.getLogger(__name__)
 CANCEL_CONFIRM_TEXT = "❗️ مطمئنی می‌خواهی ساخت پست را لغو کنی؟"
 
 
-@admin_only
+async def _cleanup_preview_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    pb = context.user_data.get("pb") or {}
+    for key in ("preview_msg_id", "ctrl_msg_id"):
+        mid = pb.get(key)
+        if mid:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except TelegramError:
+                pass
+
+
+@workspace_access
 async def cancel_builder(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    user_id = update.effective_user.id
     if update.message:
+        await _cleanup_preview_messages(context, update.message.chat_id)
         await update.message.reply_text(
             Msg.POST_CANCELLED,
-            reply_markup=main_menu_for(update.effective_user.id),
+            reply_markup=main_menu_for(user_id),
         )
     context.user_data.clear()
     return ConversationHandler.END
@@ -55,25 +68,27 @@ async def ask_cancel_confirm(
         logger.debug("ارسال پیام تأیید لغو ناموفق بود", exc_info=True)
 
 
-@admin_only
+@workspace_access
 async def confirm_cancel_yes(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
+    user_id = update.effective_user.id
+    chat_id = query.message.chat_id if query.message else user_id
     await query.answer()
+    await _cleanup_preview_messages(context, chat_id)
     try:
         await query.edit_message_text(Msg.POST_CANCELLED_INLINE)
     except TelegramError:
         pass
     context.user_data.pop("cancel_confirm_mid", None)
-    if query.from_user:
-        await go_to_main_menu(context, query.from_user.id)
+    await go_to_main_menu(context, chat_id, user_id=user_id)
     context.user_data.clear()
     return ConversationHandler.END
 
 
-@admin_only
+@workspace_access
 async def confirm_cancel_no(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -92,7 +107,7 @@ async def confirm_cancel_no(
     return None
 
 
-@admin_only
+@workspace_access
 async def cancel_from_inline(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

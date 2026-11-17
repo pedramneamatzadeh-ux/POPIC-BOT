@@ -10,7 +10,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from .constants import Msg
-from .database import db
+from .database import registry
 from .keyboards import main_menu_for
 
 logger = logging.getLogger(__name__)
@@ -24,10 +24,6 @@ _TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 PANEL_MSG_KEY = "_panel_msgs"
 
 _PRIVATE_TME_RE = re.compile(r"^https?://(?:t\.me|telegram\.me)/c/\d+/\d+", re.I)
-_PUBLIC_TME_POST_RE = re.compile(
-    r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,})/(\d+)(?:\?.*)?$",
-    re.I,
-)
 
 
 def normalize_digits(text: Optional[str]) -> str:
@@ -41,25 +37,18 @@ def is_private_tme_link(url: Optional[str]) -> bool:
 
 
 def normalize_photo_url(raw: Optional[str]) -> Tuple[Optional[str], str]:
-    """لینک ورودی عکس/پست را بررسی و نرمال‌سازی می‌کند.
-
-    خروجی: (normalized_url_or_None, error_code)
-    error_code ∈ {'', 'empty', 'private', 'invalid'}
-    """
+    """لینک ورودی عکس/پست را بررسی و نرمال‌سازی می‌کند."""
     text = (raw or "").strip()
     if not text:
         return None, "empty"
 
-    # اگر با فاصله چند خط فرستاده شده، اولین توکن شبیه لینک نباشد => نامعتبر
     if any(ch.isspace() for ch in text):
         return None, "invalid"
 
-    # پشتیبانی از @channel/123 -> https://t.me/channel/123
     if text.startswith("@") and "/" in text:
         body = text[1:]
         text = f"https://t.me/{body}"
 
-    # پشتیبانی از t.me/... یا telegram.me/... بدون https://
     lowered = text.lower()
     if lowered.startswith(("t.me/", "telegram.me/")):
         text = f"https://{text}"
@@ -78,11 +67,7 @@ def normalize_photo_url(raw: Optional[str]) -> Tuple[Optional[str], str]:
 
 
 def extract_forward_post_link(message: Any) -> Tuple[Optional[str], str]:
-    """از پیام فورواردی کانال عمومی لینک `https://t.me/<username>/<msg_id>` می‌سازد.
-
-    خروجی: (url_or_None, status)
-    status ∈ {'ok', 'private_channel', 'not_forward'}
-    """
+    """از پیام فورواردی کانال عمومی لینک `https://t.me/<username>/<msg_id>` می‌سازد."""
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
         chat = getattr(origin, "chat", None)
@@ -92,7 +77,6 @@ def extract_forward_post_link(message: Any) -> Tuple[Optional[str], str]:
             if username:
                 return f"https://t.me/{username}/{msg_id}", "ok"
             return None, "private_channel"
-        # اگر کاربر یا منبع غیرکانال فوروارد شده باشد
         sender_chat = getattr(origin, "sender_chat", None)
         if sender_chat is not None:
             username = getattr(sender_chat, "username", None)
@@ -214,7 +198,7 @@ def fmt_tehran(value: Any) -> str:
 def track_user(update: Update) -> None:
     user = update.effective_user
     if user:
-        db.save_or_update_user(
+        registry.save_or_update_user(
             user.id,
             user.username,
             user.first_name,
@@ -246,6 +230,7 @@ async def safe_edit_or_send(
     reply_markup: Optional[InlineKeyboardMarkup] = None,
     message_id: Optional[int] = None,
     parse_mode: Optional[str] = None,
+    disable_web_page_preview: bool = False,
 ) -> int:
     if message_id is not None:
         try:
@@ -255,6 +240,7 @@ async def safe_edit_or_send(
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
             )
             return message_id
         except BadRequest as exc:
@@ -269,6 +255,7 @@ async def safe_edit_or_send(
         text=text,
         reply_markup=reply_markup,
         parse_mode=parse_mode,
+        disable_web_page_preview=disable_web_page_preview,
     )
     register_panel_message(context, sent.message_id)
     return sent.message_id
@@ -281,15 +268,17 @@ def total_pages(count: int, page_size: int) -> int:
 async def go_to_main_menu(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
+    user_id: Optional[int] = None,
 ) -> None:
     try:
         context.chat_data.pop(PANEL_MSG_KEY, None)
     except (AttributeError, TypeError):
         pass
+    target_uid = user_id if user_id is not None else chat_id
     await context.bot.send_message(
         chat_id=chat_id,
         text=Msg.MAIN_MENU_PROMPT,
-        reply_markup=main_menu_for(chat_id),
+        reply_markup=main_menu_for(target_uid),
     )
 
 
@@ -326,10 +315,7 @@ async def precheck_chat(
     context: ContextTypes.DEFAULT_TYPE,
     target: Any,
 ):
-    """بررسی دسترسی ربات به کانال و ادمین بودن آن.
-
-    خروجی: (chat_obj_or_None, error_message_or_None)
-    """
+    """بررسی دسترسی ربات به کانال و ادمین بودن آن."""
     try:
         chat = await context.bot.get_chat(target)
     except TelegramError:
