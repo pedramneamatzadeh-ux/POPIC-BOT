@@ -11,10 +11,17 @@ from bot.application import create_application
 from bot.config import config
 from bot.constants import (
     BOT_VERSION,
+    DEFAULT_POPUP_TEXT,
     PM_ADD_BTN_TEXT,
     PM_ADD_BTN_URL,
+    PM_BTN_EDIT_TEXT,
+    PM_BTN_EDIT_VALUE,
     PM_DETAIL,
     PM_LIST,
+    POST_ADD_BTN_TEXT,
+    POST_ADD_BTN_URL,
+    POST_BTN_EDIT_TEXT,
+    POST_BTN_EDIT_VALUE,
     POST_PHOTO_LINK,
     POST_PREVIEW,
     POST_TEXT,
@@ -36,17 +43,24 @@ from bot.handlers.base import (
     start,
     workspace_pick_callback,
 )
+from bot.handlers.display_button import handle_display_button_callback
 from bot.handlers.post_builder import (
     cancel_from_inline,
     confirm_cancel_no,
     confirm_cancel_yes,
     handle_preview_callback,
+    receive_btn_edit_text,
+    receive_btn_edit_value,
+    receive_btn_text,
+    receive_btn_url,
     receive_photo_link,
     receive_post_text,
     start_post_builder,
 )
 from bot.handlers.post_manage import (
     handle_post_manage_callback,
+    receive_pm_btn_edit_text,
+    receive_pm_btn_edit_value,
     receive_pm_btn_text,
     receive_pm_btn_url,
     receive_pm_edit_link,
@@ -71,6 +85,7 @@ class _FakeBot:
         self.username = "popic_test_bot"
         self.sent_messages = []
         self.edited_messages = []
+        self.edited_markups = []
         self.deleted_messages = []
         self.sent_documents = []
         self.chats = {}
@@ -96,6 +111,16 @@ class _FakeBot:
         }
         self.edited_messages.append(record)
         return SimpleNamespace(chat_id=chat_id, message_id=message_id, text=text)
+
+    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
+        self.edited_markups.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": reply_markup,
+            }
+        )
+        return SimpleNamespace(chat_id=chat_id, message_id=message_id)
 
     async def delete_message(self, chat_id, message_id):
         self.deleted_messages.append((chat_id, message_id))
@@ -282,13 +307,8 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(state, POST_PREVIEW)
             self.assertFalse(bot.sent_messages[-2]["link_preview_options"].show_above_text)
 
+            # 6) Publish to channel -> sent to -100555, marked published, main menu restored
             ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
-            q_pv = _make_query(bot, 2000, 2000, ctrl_mid, "pb:send_pv")
-            state = await handle_preview_callback(_make_update(2000, 2000, callback_query=q_pv), ctx)
-            self.assertEqual(state, POST_PREVIEW)
-            self.assertEqual(ws_db.get_stats_summary()["pv_deliveries"], 1)
-            self.assertEqual(ws_db.count_posts(), 1)
-
             q_ch = _make_query(bot, 2000, 2000, ctrl_mid, "pb:send_ch")
             state = await handle_preview_callback(_make_update(2000, 2000, callback_query=q_ch), ctx)
             self.assertEqual(state, ConversationHandler.END)
@@ -296,6 +316,164 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(len(ch_posts), 1)
             self.assertEqual(ws_db.get_stats_summary()["published_posts"], 1)
             self.assertEqual(bot.sent_messages[-1]["text"], Msg.MAIN_MENU_PROMPT)
+
+        asyncio.run(run())
+
+    def test_r8_pv_delivery_deletes_only_control_message_and_restores_menu(self) -> None:
+        async def run():
+            bot = _FakeBot()
+            ctx = _make_context(bot)
+            ws_db = get_workspace_db(4000)
+
+            await start_post_builder(
+                _make_update(4000, 4000, message=_make_message(bot, 4000, 4000, "📝 ساخت پست جدید")),
+                ctx,
+            )
+            await receive_post_text(
+                _make_update(4000, 4000, message=_make_message(bot, 4000, 4000, "متن خالص پی‌وی")),
+                ctx,
+            )
+            await receive_photo_link(
+                _make_update(4000, 4000, message=_make_message(bot, 4000, 4000, "https://t.me/pics/77")),
+                ctx,
+            )
+            preview_mid = ctx.user_data["pb"]["preview_msg_id"]
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+            sent_count_before = len(bot.sent_messages)
+
+            q_pv = _make_query(bot, 4000, 4000, ctrl_mid, "pb:send_pv")
+            state = await handle_preview_callback(_make_update(4000, 4000, callback_query=q_pv), ctx)
+            self.assertEqual(state, ConversationHandler.END)
+
+            # R8: Control message deleted, preview message NOT deleted, no duplicate post sent
+            self.assertIn((4000, ctrl_mid), bot.deleted_messages)
+            self.assertNotIn((4000, preview_mid), bot.deleted_messages)
+            new_msgs = bot.sent_messages[sent_count_before:]
+            self.assertEqual(len(new_msgs), 1)
+            self.assertEqual(new_msgs[0]["text"], Msg.POST_PV_DELIVERED)
+            self.assertEqual(ws_db.get_stats_summary()["pv_deliveries"], 1)
+            self.assertEqual(ws_db.count_posts(), 1)
+
+        asyncio.run(run())
+
+    def test_r7_post_builder_advanced_buttons_colors_rows_and_popup(self) -> None:
+        async def run():
+            bot = _FakeBot()
+            ctx = _make_context(bot)
+            ws_db = get_workspace_db(4500)
+
+            await start_post_builder(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "📝 ساخت پست جدید")),
+                ctx,
+            )
+            await receive_post_text(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "پست با دکمه‌های پیشرفته")),
+                ctx,
+            )
+            await receive_photo_link(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "https://t.me/pics/88")),
+                ctx,
+            )
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+
+            # Open button manager -> add URL button
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btns")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_add")),
+                ctx,
+            )
+            state = await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_type:url")),
+                ctx,
+            )
+            self.assertEqual(state, POST_ADD_BTN_TEXT)
+            state = await receive_btn_text(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "لینک ۱")),
+                ctx,
+            )
+            self.assertEqual(state, POST_ADD_BTN_URL)
+            state = await receive_btn_url(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "https://t.me/pics/1")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PREVIEW)
+
+            # Add popup display button with default '-' popup text
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_add")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_type:popup")),
+                ctx,
+            )
+            await receive_btn_text(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "نمایشی")),
+                ctx,
+            )
+            await receive_btn_url(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "-")),
+                ctx,
+            )
+
+            # Inspect button 1 -> set color green, move up into row 0, edit text
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_ins:1")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_col:1:success")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_row_up:1")),
+                ctx,
+            )
+            state = await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_etxt:1")),
+                ctx,
+            )
+            self.assertEqual(state, POST_BTN_EDIT_TEXT)
+            await receive_btn_edit_text(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "وضعیت ویژه")),
+                ctx,
+            )
+            state = await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_eval:1")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PREVIEW)
+            state = await handle_preview_callback(
+                _make_update(4500, 4500, callback_query=_make_query(bot, 4500, 4500, ctrl_mid, "pb:btn_ctype:1:popup")),
+                ctx,
+            )
+            self.assertEqual(state, POST_BTN_EDIT_VALUE)
+            await receive_btn_edit_value(
+                _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "این دکمه نمایشی اختصاصی است")),
+                ctx,
+            )
+
+            # Deliver via pb:send_pv -> updates preview reply_markup to permanent pb_disp:<ws_id>:<post_id>:1
+            q_pv = _make_query(bot, 4500, 4500, ctrl_mid, "pb:send_pv")
+            state = await handle_preview_callback(_make_update(4500, 4500, callback_query=q_pv), ctx)
+            self.assertEqual(state, ConversationHandler.END)
+
+            last_markup = bot.edited_markups[-1]["reply_markup"]
+            self.assertEqual(len(last_markup.inline_keyboard), 1)
+            self.assertEqual(len(last_markup.inline_keyboard[0]), 2)
+            disp_cb = last_markup.inline_keyboard[0][1].callback_data
+            self.assertTrue(disp_cb.startswith("pb_disp:4500:"))
+            self.assertEqual(last_markup.inline_keyboard[0][1].style, "success")
+
+            # Any user clicking that display button sees custom alert
+            q_disp = _make_query(bot, -100111, 9999, 50, disp_cb)
+            await handle_display_button_callback(_make_update(9999, -100111, callback_query=q_disp), ctx)
+            self.assertEqual(q_disp.answers[-1]["text"], "این دکمه نمایشی اختصاصی است")
+            self.assertTrue(q_disp.answers[-1]["show_alert"])
+            self.assertEqual(ws_db.count_posts(), 1)
 
         asyncio.run(run())
 
@@ -352,13 +530,17 @@ class FlowTests(unittest.TestCase):
             state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_det), ctx)
             self.assertEqual(state, PM_DETAIL)
 
-            # R6: Manage inline buttons inside saved post
+            # R6 + R7: Manage inline buttons inside saved post (type, color, row merge, edit, delete)
             q_btns = _make_query(bot, 1000, 1000, mid, f"pm:btns:{post_id}")
             state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_btns), ctx)
             self.assertEqual(state, PM_DETAIL)
 
             q_badd = _make_query(bot, 1000, 1000, mid, f"pm:btn_add:{post_id}")
             state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_badd), ctx)
+            self.assertEqual(state, PM_DETAIL)
+
+            q_btype = _make_query(bot, 1000, 1000, mid, f"pm:btn_type:{post_id}:url")
+            state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_btype), ctx)
             self.assertEqual(state, PM_ADD_BTN_TEXT)
 
             btxt = _make_message(bot, 1000, 1000, "-")
@@ -368,19 +550,74 @@ class FlowTests(unittest.TestCase):
             burl = _make_message(bot, 1000, 1000, "https://t.me/target_ch/15")
             state = await receive_pm_btn_url(_make_update(1000, 1000, message=burl), ctx)
             self.assertEqual(state, PM_DETAIL)
-            saved_btns = deserialize_buttons(ws_db.get_post(post_id)["buttons_json"])
-            self.assertEqual(len(saved_btns), 1)
-            self.assertEqual(saved_btns[0]["url"], "https://t.me/target_ch/15")
 
-            # Publish with button -> update channel -> delete button -> delete post
+            # Add second button (copy) + inspect color + merge into row 0 + edit text
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:btn_add:{post_id}")),
+                ctx,
+            )
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:btn_type:{post_id}:copy")),
+                ctx,
+            )
+            await receive_pm_btn_text(
+                _make_update(1000, 1000, message=_make_message(bot, 1000, 1000, "کد")),
+                ctx,
+            )
+            await receive_pm_btn_url(
+                _make_update(1000, 1000, message=_make_message(bot, 1000, 1000, "POPIC100")),
+                ctx,
+            )
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_col:1:danger")),
+                ctx,
+            )
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_row_up:1")),
+                ctx,
+            )
+            state = await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_etxt:1")),
+                ctx,
+            )
+            self.assertEqual(state, PM_BTN_EDIT_TEXT)
+            await receive_pm_btn_edit_text(
+                _make_update(1000, 1000, message=_make_message(bot, 1000, 1000, "کپی کد")),
+                ctx,
+            )
+            state = await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_ctype:1:popup")),
+                ctx,
+            )
+            self.assertEqual(state, PM_BTN_EDIT_VALUE)
+            await receive_pm_btn_edit_value(
+                _make_update(1000, 1000, message=_make_message(bot, 1000, 1000, "توضیح")),
+                ctx,
+            )
+
+            saved_btns = deserialize_buttons(ws_db.get_post(post_id)["buttons_json"])
+            self.assertEqual(len(saved_btns), 2)
+            self.assertEqual(saved_btns[0]["url"], "https://t.me/target_ch/15")
+            self.assertEqual(saved_btns[1]["row"], 0)
+            self.assertEqual(saved_btns[1]["style"], "danger")
+            self.assertEqual(saved_btns[1]["text"], "کپی کد")
+            self.assertEqual(saved_btns[1]["type"], "popup")
+
+            # Publish with 2 buttons on row 0 -> update channel -> delete both buttons -> delete post
             q_pub = _make_query(bot, 1000, 1000, mid, f"pm:send_ch:{post_id}")
             await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_pub), ctx)
             self.assertEqual(ws_db.get_post(post_id)["status"], "published")
             ch_sent = [m for m in bot.sent_messages if m["chat_id"] == -100777]
-            self.assertIsNotNone(ch_sent[0]["reply_markup"])
+            self.assertEqual(len(ch_sent[0]["reply_markup"].inline_keyboard[0]), 2)
 
-            q_bdel = _make_query(bot, 1000, 1000, mid, f"pm:btn_del:{post_id}:0")
-            await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_bdel), ctx)
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_del:0")),
+                ctx,
+            )
+            await handle_post_manage_callback(
+                _make_update(1000, 1000, callback_query=_make_query(bot, 1000, 1000, mid, f"pm:{post_id}:btn_del:0")),
+                ctx,
+            )
             self.assertEqual(deserialize_buttons(ws_db.get_post(post_id)["buttons_json"]), [])
 
             q_et = _make_query(bot, 1000, 1000, mid, f"pm:edit_text:{post_id}")

@@ -10,6 +10,8 @@ from bot.keyboards import (
     POST_CANCEL_INLINE,
     ib,
     main_menu_for,
+    post_button_inspector_keyboard,
+    post_button_type_keyboard,
     post_buttons_manage_keyboard,
     post_manage_detail_keyboard,
     post_preview_controls_keyboard,
@@ -113,13 +115,42 @@ class ButtonTests(unittest.TestCase):
         self.assertIn("pm:btns:7", all_callbacks)
 
         btns_kb = post_buttons_manage_keyboard(
-            [{"text": "لینک", "url": "https://t.me/a/1"}],
+            [
+                {"text": "لینک", "type": "url", "url": "https://t.me/a/1", "style": "primary", "row": 0},
+                {"text": "نمایشی", "type": "popup", "popup_text": "تست", "style": "success", "row": 0},
+            ],
             add_callback="pm:btn_add:7",
-            del_prefix="pm:btn_del:7:",
+            inspect_prefix="pm:btn_ins:7:",
             back_callback="pm:detail:7",
         )
-        self.assertEqual(btns_kb.inline_keyboard[0][0].callback_data, "pm:btn_del:7:0")
-        self.assertEqual(btns_kb.inline_keyboard[0][0].style, "danger")
+        self.assertEqual(len(btns_kb.inline_keyboard[0]), 2)
+        self.assertEqual(btns_kb.inline_keyboard[0][0].callback_data, "pm:btn_ins:7:0")
+        self.assertEqual(btns_kb.inline_keyboard[0][0].style, "primary")
+        self.assertEqual(btns_kb.inline_keyboard[0][1].style, "success")
+
+        type_kb = post_button_type_keyboard("pb:btn_type:", "pb:btns")
+        self.assertEqual(type_kb.inline_keyboard[0][0].callback_data, "pb:btn_type:url")
+        self.assertEqual(type_kb.inline_keyboard[1][0].callback_data, "pb:btn_type:popup")
+        self.assertEqual(type_kb.inline_keyboard[2][0].callback_data, "pb:btn_type:copy")
+
+        insp_kb = post_button_inspector_keyboard(
+            [
+                {"text": "لینک", "type": "url", "url": "https://t.me/a/1", "style": "primary", "row": 0},
+                {"text": "نمایشی", "type": "popup", "popup_text": "تست", "style": None, "row": 0},
+            ],
+            idx=0,
+            prefix="pb",
+            back_callback="pb:btns",
+        )
+        # 4 color buttons on first row: None, primary, success, danger
+        self.assertEqual(len(insp_kb.inline_keyboard[0]), 4)
+        self.assertIsNone(insp_kb.inline_keyboard[0][0].style)
+        self.assertEqual(insp_kb.inline_keyboard[0][1].style, "primary")
+        self.assertEqual(insp_kb.inline_keyboard[0][2].style, "success")
+        self.assertEqual(insp_kb.inline_keyboard[0][3].style, "danger")
+        self.assertIn("✓", insp_kb.inline_keyboard[0][1].text)
+        # Row 2 has left, right, AND split because 2 buttons share row 0
+        self.assertEqual(len(insp_kb.inline_keyboard[2]), 3)
 
 
 if __name__ == "__main__":

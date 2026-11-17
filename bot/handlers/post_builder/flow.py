@@ -1,19 +1,24 @@
-"""فلوی اصلی ساخت پست: متن -> لینک عکس -> پیش‌نمایش زنده -> ارسال به کانال یا پی‌وی."""
+"""فلوی اصلی ساخت پست: متن -> لینک عکس -> پیش‌نمایش زنده -> تنظیمات دکمه -> ارسال به کانال یا پی‌وی."""
 
 import html
 import logging
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List
 
 from telegram import ReplyKeyboardRemove, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ...constants import (
+    DEFAULT_POPUP_TEXT,
     MAX_BUTTON_TEXT_LENGTH,
+    MAX_COPY_TEXT_LENGTH,
     MAX_EXTRA_BUTTONS,
+    MAX_POPUP_TEXT_LENGTH,
     MAX_POST_TEXT_LENGTH,
     POST_ADD_BTN_TEXT,
     POST_ADD_BTN_URL,
+    POST_BTN_EDIT_TEXT,
+    POST_BTN_EDIT_VALUE,
     POST_EDIT_LINK,
     POST_EDIT_TEXT,
     POST_PHOTO_LINK,
@@ -26,16 +31,28 @@ from ...decorators import workspace_access
 from ...keyboards import (
     POST_CANCEL_INLINE,
     input_back_keyboard,
+    main_menu_for,
+    post_button_inspector_keyboard,
+    post_button_type_keyboard,
     post_buttons_manage_keyboard,
     post_channels_keyboard,
     post_preview_controls_keyboard,
 )
+from ...services.button_ui import (
+    build_button_inspector_text,
+    build_buttons_overview_text,
+)
 from ...services.publisher import (
+    move_button_row,
+    move_button_side,
+    normalize_buttons,
     send_post_to_chat,
     serialize_buttons,
     serialize_entities,
+    split_button_new_row,
 )
 from ...utils import (
+    PANEL_MSG_KEY,
     build_telegram_message_link,
     extract_forward_post_link,
     go_to_main_menu,
@@ -49,6 +66,7 @@ from .common import (
     delete_answer_message,
     send_or_refresh_preview,
     set_question_message,
+    sync_preview_buttons,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +82,17 @@ def _extract_photo_url_from_message(message) -> tuple[str | None, str]:
 
     raw_text = (message.text or "").strip()
     return normalize_photo_url(raw_text)
+
+
+def _extract_button_url(message) -> str | None:
+    url, err = _extract_photo_url_from_message(message)
+    if not url and err == "private":
+        raw_text = (message.text or "").strip()
+        if raw_text.lower().startswith(("t.me/", "telegram.me/")):
+            url = f"https://{raw_text}"
+        elif raw_text.lower().startswith(("http://", "https://")):
+            url = raw_text
+    return url
 
 
 def _ensure_post_saved(ws_db: Any, pb: Dict[str, Any], user_id: int) -> int:
@@ -92,6 +121,133 @@ def _ensure_post_saved(ws_db: Any, pb: Dict[str, Any], user_id: int) -> int:
             buttons_json=buttons_json,
         )
     return int(post_id)
+
+
+def _value_prompt_for_type(btn_type: str, label: str) -> str:
+    if btn_type == "popup":
+        return Msg.POST_ASK_BTN_POPUP.format(
+            label=label, default_popup=DEFAULT_POPUP_TEXT
+        )
+    if btn_type == "copy":
+        return Msg.POST_ASK_BTN_COPY.format(label=label)
+    return Msg.POST_ASK_BTN_URL.format(label=label)
+
+
+def _parse_button_value(
+    btn_type: str,
+    message: Any,
+) -> tuple[Dict[str, str] | None, str | None]:
+    if btn_type == "popup":
+        raw = (getattr(message, "text", None) or "").strip()
+        text = DEFAULT_POPUP_TEXT if raw == "-" else raw
+        if not 1 <= len(text) <= MAX_POPUP_TEXT_LENGTH:
+            return None, Msg.BTN_POPUP_INVALID
+        return {"popup_text": text}, None
+
+    if btn_type == "copy":
+        raw = (getattr(message, "text", None) or "").strip()
+        if not 1 <= len(raw) <= MAX_COPY_TEXT_LENGTH:
+            return None, Msg.BTN_COPY_INVALID
+        return {"copy_text": raw}, None
+
+    url = _extract_button_url(message)
+    if not url:
+        return None, Msg.POST_LINK_INVALID
+    return {"url": url}, None
+
+
+async def _show_buttons_manager(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    pb: Dict[str, Any],
+    message_id: int | None = None,
+) -> None:
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    pb["buttons"] = buttons
+    text = build_buttons_overview_text(buttons)
+    markup = post_buttons_manage_keyboard(buttons)
+    mid = message_id or pb.get("ctrl_msg_id")
+    if mid:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=mid,
+                text=text,
+                reply_markup=markup,
+                parse_mode="HTML",
+            )
+            return
+        except TelegramError as exc:
+            if "not modified" in str(exc).lower():
+                return
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+    )
+    pb["ctrl_msg_id"] = sent.message_id
+    register_panel_message(context, sent.message_id)
+
+
+async def _show_button_inspector(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    pb: Dict[str, Any],
+    idx: int,
+    message_id: int | None = None,
+) -> None:
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    pb["buttons"] = buttons
+    if not 0 <= idx < len(buttons):
+        await _show_buttons_manager(context, chat_id, pb, message_id=message_id)
+        return
+    text = build_button_inspector_text(buttons, idx)
+    markup = post_button_inspector_keyboard(buttons, idx, prefix="pb", back_callback="pb:btns")
+    mid = message_id or pb.get("ctrl_msg_id")
+    if mid:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=mid,
+                text=text,
+                reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        except TelegramError as exc:
+            if "not modified" in str(exc).lower():
+                return
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    pb["ctrl_msg_id"] = sent.message_id
+    register_panel_message(context, sent.message_id)
+
+
+def _apply_layout_transform(
+    pb: Dict[str, Any],
+    idx: int,
+    transform: Callable[[List[Dict[str, Any]], int], List[Dict[str, Any]]],
+) -> int:
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    if not 0 <= idx < len(buttons):
+        return idx
+    buttons[idx]["_track"] = True
+    # preserve _track through copy inside transform
+    moved = transform(buttons, idx)
+    new_idx = idx
+    for i, b in enumerate(moved):
+        if b.pop("_track", False):
+            new_idx = i
+            break
+    pb["buttons"] = normalize_buttons(moved)
+    return new_idx
 
 
 @workspace_access
@@ -128,6 +284,7 @@ async def receive_post_text(
 ) -> int:
     message = update.message
     ws_db = context.user_data["_ws_db"]
+    ws_id = context.user_data["_ws_id"]
 
     if not message or not message.text or not message.text.strip():
         sent = await message.reply_text(
@@ -150,6 +307,7 @@ async def receive_post_text(
 
     entities_json = serialize_entities(message.entities)
     context.user_data["pb"] = {
+        "ws_id": ws_id,
         "text": text,
         "entities_json": entities_json,
         "photo_url": "",
@@ -206,8 +364,6 @@ async def receive_photo_link(
     pb["photo_url"] = photo_url
     await close_question_message(context, message.chat_id, photo_url)
 
-    # نکته R2: تا پیش از ارسال/تحویل/پایان، رکوردی در دیتابیس ذخیره نمی‌شود
-    # تا لغو کردن هیچ پستی در «پست‌های ذخیره‌شده» باقی نگذارد.
     try:
         await send_or_refresh_preview(context, message.chat_id, pb)
     except TelegramError as exc:
@@ -234,9 +390,13 @@ async def _publish_to_channel(
     user_id: int,
 ) -> tuple[int, str | None]:
     ws_db = context.user_data["_ws_db"]
+    ws_id = context.user_data["_ws_id"]
     channel = ws_db.get_target_channel(channel_id)
     if not channel:
         return POST_PREVIEW, "❌ کانال مورد نظر پیدا نشد."
+
+    was_new = pb.get("post_id") is None
+    post_id = _ensure_post_saved(ws_db, pb, user_id)
 
     try:
         sent = await send_post_to_chat(
@@ -248,12 +408,16 @@ async def _publish_to_channel(
             show_above_text=pb["show_above_text"],
             prefer_large_media=pb["prefer_large_media"],
             buttons=pb.get("buttons") or [],
+            workspace_id=ws_id,
+            post_id=post_id,
         )
     except TelegramError as exc:
+        if was_new:
+            ws_db.delete_post(post_id)
+            pb["post_id"] = None
         logger.warning("ارسال به کانال %s ناموفق: %s", channel["chat_id"], exc)
         return POST_PREVIEW, Msg.CHANNEL_SEND_FAILED.format(error=exc)
 
-    post_id = _ensure_post_saved(ws_db, pb, user_id)
     ws_db.mark_post_published(
         post_id=post_id,
         channel_chat_id=channel["chat_id"],
@@ -305,36 +469,67 @@ async def handle_preview_callback(
         return ConversationHandler.END
 
     chat_id = query.message.chat_id if query.message else user_id
+    ctrl_mid = query.message.message_id if query.message else pb.get("ctrl_msg_id")
 
+    # R8: تحویل در پی‌وی فقط پیام کنترل را حذف می‌کند و پست بالای سرش باقی می‌ماند + منو برمی‌گردد
     if data == "pb:send_pv":
-        try:
-            sent = await send_post_to_chat(
-                bot=context.bot,
-                chat_id=chat_id,
-                text=pb["text"],
-                entities_json=pb["entities_json"],
-                photo_url=pb["photo_url"],
-                show_above_text=pb["show_above_text"],
-                prefer_large_media=pb["prefer_large_media"],
-                buttons=pb.get("buttons") or [],
-            )
-        except TelegramError as exc:
-            await query.answer(f"❌ ارسال ناموفق: {exc}", show_alert=True)
-            return POST_PREVIEW
-
         post_id = _ensure_post_saved(ws_db, pb, user_id)
-        ws_db.record_delivery(
-            post_id=post_id,
-            target_type="pv",
-            target_chat_id=chat_id,
-            message_id=sent.message_id,
-            sent_by=user_id,
+        if pb.get("preview_msg_id"):
+            await sync_preview_buttons(context, chat_id, pb)
+            ws_db.record_delivery(
+                post_id=post_id,
+                target_type="pv",
+                target_chat_id=chat_id,
+                message_id=pb["preview_msg_id"],
+                sent_by=user_id,
+            )
+        else:
+            try:
+                sent = await send_post_to_chat(
+                    bot=context.bot,
+                    chat_id=chat_id,
+                    text=pb["text"],
+                    entities_json=pb["entities_json"],
+                    photo_url=pb["photo_url"],
+                    show_above_text=pb["show_above_text"],
+                    prefer_large_media=pb["prefer_large_media"],
+                    buttons=pb.get("buttons") or [],
+                    workspace_id=pb.get("ws_id"),
+                    post_id=post_id,
+                )
+                ws_db.record_delivery(
+                    post_id=post_id,
+                    target_type="pv",
+                    target_chat_id=chat_id,
+                    message_id=sent.message_id,
+                    sent_by=user_id,
+                )
+            except TelegramError as exc:
+                await query.answer(f"❌ ارسال ناموفق: {exc}", show_alert=True)
+                return POST_PREVIEW
+
+        await query.answer("✅ پست در پی‌وی آماده است!")
+        target_ctrl_mid = pb.get("ctrl_msg_id") or ctrl_mid
+        if target_ctrl_mid:
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=target_ctrl_mid,
+                )
+            except TelegramError:
+                pass
+        try:
+            context.chat_data.pop(PANEL_MSG_KEY, None)
+        except (AttributeError, TypeError):
+            pass
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=Msg.POST_PV_DELIVERED,
+            reply_markup=main_menu_for(user_id),
         )
-        await query.answer(
-            "✅ پست خالص در پی‌وی ارسال شد — می‌توانید فوروارد یا کپی کنید.",
-            show_alert=True,
-        )
-        return POST_PREVIEW
+        context.user_data.clear()
+        return ConversationHandler.END
 
     if data == "pb:send_ch":
         channels = ws_db.get_target_channels()
@@ -416,10 +611,7 @@ async def handle_preview_callback(
 
     if data == "pb:btns":
         await query.answer()
-        await query.edit_message_text(
-            "🔘 مدیریت دکمه‌های شیشه‌ای اختیاری زیر پست:",
-            reply_markup=post_buttons_manage_keyboard(pb.get("buttons") or []),
-        )
+        await _show_buttons_manager(context, chat_id, pb, message_id=ctrl_mid)
         return POST_PREVIEW
 
     if data == "pb:btn_add":
@@ -432,22 +624,156 @@ async def handle_preview_callback(
             return POST_PREVIEW
         await query.answer()
         await query.edit_message_text(
+            Msg.POST_ASK_BTN_TYPE,
+            reply_markup=post_button_type_keyboard("pb:btn_type:", "pb:btns"),
+        )
+        return POST_PREVIEW
+
+    if data.startswith("pb:btn_type:"):
+        btn_type = data.split(":", 2)[2]
+        if btn_type not in ("url", "popup", "copy"):
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        pb["pending_btn_type"] = btn_type
+        pb["ctrl_msg_id"] = ctrl_mid
+        await query.answer()
+        await query.edit_message_text(
             Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
-            reply_markup=input_back_keyboard("pb:btns"),
+            reply_markup=input_back_keyboard("pb:btn_add"),
         )
         return POST_ADD_BTN_TEXT
 
+    if data.startswith("pb:btn_ins:"):
+        raw_idx = data.split(":", 2)[2]
+        if not raw_idx.isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        await query.answer()
+        await _show_button_inspector(
+            context, chat_id, pb, int(raw_idx), message_id=ctrl_mid
+        )
+        return POST_PREVIEW
+
+    if data.startswith("pb:btn_col:"):
+        parts = data.split(":")
+        if len(parts) != 4 or not parts[2].isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        idx = int(parts[2])
+        token = parts[3]
+        style_map = {
+            "none": None,
+            "primary": "primary",
+            "success": "success",
+            "danger": "danger",
+        }
+        if token not in style_map:
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        buttons = normalize_buttons(pb.get("buttons") or [])
+        if not 0 <= idx < len(buttons):
+            await query.answer("❌ دکمه پیدا نشد.", show_alert=True)
+            return POST_PREVIEW
+        buttons[idx]["style"] = style_map[token]
+        pb["buttons"] = buttons
+        if pb.get("post_id"):
+            ws_db.update_post(pb["post_id"], buttons_json=serialize_buttons(buttons))
+        await sync_preview_buttons(context, chat_id, pb)
+        await query.answer("🎨 رنگ دکمه به‌روزرسانی شد.")
+        await _show_button_inspector(context, chat_id, pb, idx, message_id=ctrl_mid)
+        return POST_PREVIEW
+
+    if data.startswith(("pb:btn_row_up:", "pb:btn_row_dn:", "pb:btn_left:", "pb:btn_right:", "pb:btn_split:")):
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        action, idx = parts[1], int(parts[2])
+        fn_map = {
+            "btn_row_up": lambda bs, i: move_button_row(bs, i, -1),
+            "btn_row_dn": lambda bs, i: move_button_row(bs, i, 1),
+            "btn_left": lambda bs, i: move_button_side(bs, i, -1),
+            "btn_right": lambda bs, i: move_button_side(bs, i, 1),
+            "btn_split": split_button_new_row,
+        }
+        new_idx = _apply_layout_transform(pb, idx, fn_map[action])
+        if pb.get("post_id"):
+            ws_db.update_post(
+                pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
+            )
+        await sync_preview_buttons(context, chat_id, pb)
+        await query.answer("📐 چیدمان به‌روزرسانی شد.")
+        await _show_button_inspector(context, chat_id, pb, new_idx, message_id=ctrl_mid)
+        return POST_PREVIEW
+
+    if data.startswith("pb:btn_etxt:"):
+        raw_idx = data.split(":", 2)[2]
+        buttons = normalize_buttons(pb.get("buttons") or [])
+        if not raw_idx.isdigit() or not 0 <= int(raw_idx) < len(buttons):
+            await query.answer("❌ دکمه پیدا نشد.", show_alert=True)
+            return POST_PREVIEW
+        idx = int(raw_idx)
+        pb["editing_btn_idx"] = idx
+        pb["ctrl_msg_id"] = ctrl_mid
+        await query.answer()
+        await query.edit_message_text(
+            f"✏️ متن جدید دکمه (فعلی: «{buttons[idx]['text']}») را ارسال کن:",
+            reply_markup=input_back_keyboard(f"pb:btn_ins:{idx}"),
+        )
+        return POST_BTN_EDIT_TEXT
+
+    if data.startswith("pb:btn_eval:"):
+        raw_idx = data.split(":", 2)[2]
+        buttons = normalize_buttons(pb.get("buttons") or [])
+        if not raw_idx.isdigit() or not 0 <= int(raw_idx) < len(buttons):
+            await query.answer("❌ دکمه پیدا نشد.", show_alert=True)
+            return POST_PREVIEW
+        idx = int(raw_idx)
+        await query.answer()
+        await query.edit_message_text(
+            f"🔀 نوع جدید دکمه «{buttons[idx]['text']}» را انتخاب کن:",
+            reply_markup=post_button_type_keyboard(
+                f"pb:btn_ctype:{idx}:",
+                f"pb:btn_ins:{idx}",
+            ),
+        )
+        return POST_PREVIEW
+
+    if data.startswith("pb:btn_ctype:"):
+        parts = data.split(":")
+        if len(parts) != 4 or not parts[2].isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        idx = int(parts[2])
+        btn_type = parts[3]
+        buttons = normalize_buttons(pb.get("buttons") or [])
+        if not 0 <= idx < len(buttons) or btn_type not in ("url", "popup", "copy"):
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        pb["editing_btn_idx"] = idx
+        pb["editing_btn_type"] = btn_type
+        pb["ctrl_msg_id"] = ctrl_mid
+        await query.answer()
+        await query.edit_message_text(
+            _value_prompt_for_type(btn_type, buttons[idx]["text"]),
+            reply_markup=input_back_keyboard(f"pb:btn_ins:{idx}"),
+            disable_web_page_preview=True,
+        )
+        return POST_BTN_EDIT_VALUE
+
     if data.startswith("pb:btn_del:"):
         raw_idx = data.split(":", 2)[2]
-        buttons = pb.get("buttons") or []
+        buttons = normalize_buttons(pb.get("buttons") or [])
         if raw_idx.isdigit() and 0 <= int(raw_idx) < len(buttons):
             buttons.pop(int(raw_idx))
+            pb["buttons"] = normalize_buttons(buttons)
             if pb.get("post_id"):
                 ws_db.update_post(
-                    pb["post_id"], buttons_json=serialize_buttons(buttons)
+                    pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
                 )
+            await sync_preview_buttons(context, chat_id, pb)
             await query.answer("🗑 دکمه حذف شد.")
-            await send_or_refresh_preview(context, chat_id, pb)
+            await _show_buttons_manager(context, chat_id, pb, message_id=ctrl_mid)
             return POST_PREVIEW
         await query.answer(Msg.INVALID_COMMAND, show_alert=True)
         return POST_PREVIEW
@@ -575,11 +901,29 @@ async def receive_btn_text(
         return POST_ADD_BTN_TEXT
 
     pb["pending_btn_label"] = label
+    btn_type = pb.get("pending_btn_type") or "url"
+    await delete_answer_message(context, message)
+    ctrl_mid = pb.get("ctrl_msg_id")
+    prompt = _value_prompt_for_type(btn_type, label)
+    if ctrl_mid:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=ctrl_mid,
+                text=prompt,
+                reply_markup=input_back_keyboard("pb:btns"),
+                disable_web_page_preview=True,
+            )
+            return POST_ADD_BTN_URL
+        except TelegramError:
+            pass
+
     sent = await message.reply_text(
-        Msg.POST_ASK_BTN_URL.format(label=label),
+        prompt,
         reply_markup=input_back_keyboard("pb:btns"),
         disable_web_page_preview=True,
     )
+    pb["ctrl_msg_id"] = sent.message_id
     register_panel_message(context, sent.message_id)
     return POST_ADD_BTN_URL
 
@@ -595,29 +939,112 @@ async def receive_btn_url(
     if not pb:
         return ConversationHandler.END
 
-    url, err = _extract_photo_url_from_message(message)
-    if not url and err == "private":
-        raw_text = (message.text or "").strip()
-        if raw_text.lower().startswith(("t.me/", "telegram.me/")):
-            url = f"https://{raw_text}"
-        elif raw_text.lower().startswith(("http://", "https://")):
-            url = raw_text
-
-    if not url:
+    btn_type = pb.get("pending_btn_type") or "url"
+    extra, err_msg = _parse_button_value(btn_type, message)
+    if err_msg or extra is None:
         await message.reply_text(
-            Msg.POST_LINK_INVALID,
+            err_msg or Msg.POST_LINK_INVALID,
             reply_markup=input_back_keyboard("pb:btns"),
             disable_web_page_preview=True,
         )
         return POST_ADD_BTN_URL
 
     label = pb.pop("pending_btn_label", None) or ws_db.get_default_button_text()
-    pb.setdefault("buttons", []).append({"text": label, "url": url})
+    pb.pop("pending_btn_type", None)
+
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    next_row = (max((b["row"] for b in buttons), default=-1) + 1)
+    new_btn = {
+        "text": label,
+        "type": btn_type,
+        "style": None,
+        "row": next_row,
+        **extra,
+    }
+    buttons.append(new_btn)
+    pb["buttons"] = normalize_buttons(buttons)
     if pb.get("post_id"):
         ws_db.update_post(
             pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
         )
 
-    await send_or_refresh_preview(context, message.chat_id, pb)
     await delete_answer_message(context, message)
+    await sync_preview_buttons(context, message.chat_id, pb)
+    await _show_buttons_manager(context, message.chat_id, pb)
+    return POST_PREVIEW
+
+
+@workspace_access
+async def receive_btn_edit_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    ws_db = context.user_data["_ws_db"]
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    idx = pb.get("editing_btn_idx")
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    if idx is None or not 0 <= idx < len(buttons):
+        return POST_PREVIEW
+
+    new_label = (message.text or "").strip()
+    if not 1 <= len(new_label) <= MAX_BUTTON_TEXT_LENGTH:
+        await message.reply_text(
+            Msg.BTN_LABEL_INVALID,
+            reply_markup=input_back_keyboard(f"pb:btn_ins:{idx}"),
+        )
+        return POST_BTN_EDIT_TEXT
+
+    buttons[idx]["text"] = new_label
+    pb["buttons"] = buttons
+    pb.pop("editing_btn_idx", None)
+    if pb.get("post_id"):
+        ws_db.update_post(pb["post_id"], buttons_json=serialize_buttons(buttons))
+
+    await delete_answer_message(context, message)
+    await sync_preview_buttons(context, message.chat_id, pb)
+    await _show_button_inspector(context, message.chat_id, pb, idx)
+    return POST_PREVIEW
+
+
+@workspace_access
+async def receive_btn_edit_value(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    ws_db = context.user_data["_ws_db"]
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    idx = pb.get("editing_btn_idx")
+    btn_type = pb.get("editing_btn_type")
+    buttons = normalize_buttons(pb.get("buttons") or [])
+    if idx is None or not 0 <= idx < len(buttons) or btn_type not in ("url", "popup", "copy"):
+        return POST_PREVIEW
+
+    extra, err_msg = _parse_button_value(btn_type, message)
+    if err_msg or extra is None:
+        await message.reply_text(
+            err_msg or Msg.POST_LINK_INVALID,
+            reply_markup=input_back_keyboard(f"pb:btn_ins:{idx}"),
+            disable_web_page_preview=True,
+        )
+        return POST_BTN_EDIT_VALUE
+
+    cur = buttons[idx]
+    cur.pop("url", None)
+    cur.pop("popup_text", None)
+    cur.pop("copy_text", None)
+    cur["type"] = btn_type
+    cur.update(extra)
+    pb["buttons"] = normalize_buttons(buttons)
+    pb.pop("editing_btn_idx", None)
+    pb.pop("editing_btn_type", None)
+    if pb.get("post_id"):
+        ws_db.update_post(
+            pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
+        )
+
+    await delete_answer_message(context, message)
+    await sync_preview_buttons(context, message.chat_id, pb)
+    await _show_button_inspector(context, message.chat_id, pb, idx)
     return POST_PREVIEW

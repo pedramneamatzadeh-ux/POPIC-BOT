@@ -18,6 +18,8 @@ from .config import config
 from .constants import (
     PM_ADD_BTN_TEXT,
     PM_ADD_BTN_URL,
+    PM_BTN_EDIT_TEXT,
+    PM_BTN_EDIT_VALUE,
     PM_DETAIL,
     PM_EDIT_LINK,
     PM_EDIT_TEXT,
@@ -25,6 +27,8 @@ from .constants import (
     PM_SELECT_CHANNEL,
     POST_ADD_BTN_TEXT,
     POST_ADD_BTN_URL,
+    POST_BTN_EDIT_TEXT,
+    POST_BTN_EDIT_VALUE,
     POST_EDIT_LINK,
     POST_EDIT_TEXT,
     POST_PHOTO_LINK,
@@ -45,12 +49,15 @@ from .handlers.base import (
     start,
     workspace_pick_callback,
 )
+from .handlers.display_button import handle_display_button_callback
 from .handlers.post_builder import (
     cancel_builder,
     cancel_from_inline,
     confirm_cancel_no,
     confirm_cancel_yes,
     handle_preview_callback,
+    receive_btn_edit_text,
+    receive_btn_edit_value,
     receive_btn_text,
     receive_btn_url,
     receive_edit_link,
@@ -61,6 +68,8 @@ from .handlers.post_builder import (
 )
 from .handlers.post_manage import (
     handle_post_manage_callback,
+    receive_pm_btn_edit_text,
+    receive_pm_btn_edit_value,
     receive_pm_btn_text,
     receive_pm_btn_url,
     receive_pm_edit_link,
@@ -185,6 +194,16 @@ def create_application() -> Application:
                 CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
                 *cancel_inline_handlers,
             ],
+            POST_BTN_EDIT_TEXT: [
+                MessageHandler(text_input_filter, receive_btn_edit_text),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
+            ],
+            POST_BTN_EDIT_VALUE: [
+                MessageHandler(forward_or_text, receive_btn_edit_value),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_builder),
@@ -229,6 +248,14 @@ def create_application() -> Application:
             ],
             PM_ADD_BTN_URL: [
                 MessageHandler(forward_or_text, receive_pm_btn_url),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
+            ],
+            PM_BTN_EDIT_TEXT: [
+                MessageHandler(text_input_filter, receive_pm_btn_edit_text),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
+            ],
+            PM_BTN_EDIT_VALUE: [
+                MessageHandler(forward_or_text, receive_pm_btn_edit_value),
                 CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
         },
@@ -301,6 +328,9 @@ def create_application() -> Application:
     )
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(
+        CallbackQueryHandler(handle_display_button_callback, pattern=r"^pb_disp:")
+    )
     application.add_handler(
         CallbackQueryHandler(workspace_pick_callback, pattern=r"^ws_pick:\d+$")
     )

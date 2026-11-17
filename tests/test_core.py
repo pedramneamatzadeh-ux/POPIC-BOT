@@ -9,7 +9,7 @@ from telegram import MessageEntity
 import main as app_main
 from bot.application import create_application
 from bot.config import config
-from bot.constants import BOT_VERSION, BOT_VERSION_DATE
+from bot.constants import BOT_VERSION, BOT_VERSION_DATE, DEFAULT_POPUP_TEXT
 from bot.database import (
     Database,
     clear_workspace_cache,
@@ -22,8 +22,13 @@ from bot.services.publisher import (
     build_link_preview_options,
     deserialize_buttons,
     deserialize_entities,
+    group_buttons_by_row,
+    move_button_row,
+    move_button_side,
+    normalize_buttons,
     serialize_buttons,
     serialize_entities,
+    split_button_new_row,
 )
 from bot.utils import (
     build_telegram_message_link,
@@ -67,8 +72,8 @@ class CoreTests(unittest.TestCase):
         app = create_application()
         self.assertIn(-1, app.handlers)
         self.assertIn(0, app.handlers)
-        # group 0: /start + ws_pick + switch_btn + 4 convs + backup = 8
-        self.assertEqual(len(app.handlers[0]), 8)
+        # group 0: /start + pb_disp + ws_pick + switch_btn + 4 convs + backup = 9
+        self.assertEqual(len(app.handlers[0]), 9)
         self.assertEqual(len(app.handlers[1]), 1)
         self.assertTrue(len(app.error_handlers) >= 1)
 
@@ -220,8 +225,49 @@ class CoreTests(unittest.TestCase):
 
         btns_json = serialize_buttons([{"text": "عکس", "url": "https://t.me/a/1"}])
         btns = deserialize_buttons(btns_json)
+        self.assertEqual(btns[0]["type"], "url")
+        self.assertIsNone(btns[0]["style"])
         markup = build_buttons_markup(btns)
         self.assertEqual(markup.inline_keyboard[0][0].url, "https://t.me/a/1")
+
+    def test_advanced_buttons_types_colors_and_row_layout(self) -> None:
+        raw = [
+            {"text": "لینک", "type": "url", "url": "https://t.me/a/1", "style": "primary", "row": 0},
+            {"text": "نمایشی", "type": "popup", "popup_text": "", "style": "success", "row": 1},
+            {"text": "کپی کد", "type": "copy", "copy_text": "OFF20", "style": None, "row": 2},
+        ]
+        norm = normalize_buttons(raw)
+        self.assertEqual(norm[1]["popup_text"], DEFAULT_POPUP_TEXT)
+        self.assertEqual(len(group_buttons_by_row(norm)), 3)
+
+        # Move button 1 up onto row 0 -> 2 buttons in row 0
+        merged = move_button_row(norm, 1, -1)
+        rows = group_buttons_by_row(merged)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows[0]), 2)
+        self.assertEqual([b["text"] for _, b in rows[0]], ["لینک", "نمایشی"])
+
+        # Swap left/right inside row 0
+        swapped = move_button_side(merged, 1, -1)
+        self.assertEqual([b["text"] for _, b in group_buttons_by_row(swapped)[0]], ["نمایشی", "لینک"])
+
+        # Split button 0 back into its own row
+        split = split_button_new_row(swapped, 0)
+        self.assertEqual(len(group_buttons_by_row(split)), 3)
+
+        # Build markup for saved post in workspace 500, post 12
+        markup = build_buttons_markup(merged, workspace_id=500, post_id=12)
+        self.assertEqual(len(markup.inline_keyboard), 2)
+        self.assertEqual(len(markup.inline_keyboard[0]), 2)
+        self.assertEqual(markup.inline_keyboard[0][0].style, "primary")
+        self.assertEqual(markup.inline_keyboard[0][1].callback_data, "pb_disp:500:12:1")
+        self.assertEqual(markup.inline_keyboard[0][1].style, "success")
+        self.assertEqual(markup.inline_keyboard[1][0].copy_text.text, "OFF20")
+        self.assertIsNone(markup.inline_keyboard[1][0].style)
+
+        # Preview mode markup uses pb_disp:pv:<idx>
+        pv_markup = build_buttons_markup(merged)
+        self.assertEqual(pv_markup.inline_keyboard[0][1].callback_data, "pb_disp:pv:1")
 
     def test_utils_helpers(self) -> None:
         self.assertEqual(normalize_digits("۱۲۳۴٥٦"), "123456")

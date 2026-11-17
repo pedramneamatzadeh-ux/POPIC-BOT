@@ -9,6 +9,12 @@ from telegram import (
 
 from .constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON
 from .database import registry, resolve_user_workspace
+from .services.publisher import (
+    STYLE_ICONS,
+    TYPE_ICONS,
+    group_buttons_by_row,
+    normalize_buttons,
+)
 
 # ---------------------------------------------------------------------------
 # رنگ دکمه‌ها (Bot API 9.4 — style: primary/success/danger)
@@ -22,7 +28,7 @@ def _infer_style(text: str, callback_data: str = "") -> Optional[str]:
         return "danger"
     if any(
         token in callback_data
-        for token in ("_del", ":del", "delete")
+        for token in ("_del", ":del", "delete", "btn_del")
     ):
         return "danger"
     return "success"
@@ -36,6 +42,17 @@ def ib(
     if style is None:
         style = _infer_style(text, str(kwargs.get("callback_data") or ""))
     if style:
+        kwargs["style"] = style
+    return InlineKeyboardButton(text, **kwargs)
+
+
+def ib_exact(
+    text: str,
+    style: Optional[str] = None,
+    **kwargs,
+) -> InlineKeyboardButton:
+    """دکمه اینلاین با رنگ دقیق انتخابی (بدون استنتاج خودکار رنگ)."""
+    if style in ("primary", "success", "danger"):
         kwargs["style"] = style
     return InlineKeyboardButton(text, **kwargs)
 
@@ -176,7 +193,7 @@ def build_pagination_row(
 
 
 # ---------------------------------------------------------------------------
-# کیبوردهای کنترل پیش‌نمایش در فلوی ساخت پست
+# کیبوردهای کنترل پیش‌نمایش و ویرایشگر پیشرفته دکمه‌های شیشه‌ای
 # ---------------------------------------------------------------------------
 
 def post_preview_controls_keyboard(
@@ -245,22 +262,30 @@ def post_channels_keyboard(
 
 
 def post_buttons_manage_keyboard(
-    buttons: List[Dict[str, str]],
+    buttons: List[Dict[str, Any]],
     add_callback: str = "pb:btn_add",
-    del_prefix: str = "pb:btn_del:",
+    inspect_prefix: str = "pb:btn_ins:",
     back_callback: str = "pb:back_preview",
 ) -> InlineKeyboardMarkup:
-    rows = []
-    for idx, btn in enumerate(buttons):
-        rows.append(
-            [
-                ib(
-                    f"🗑 حذف: {btn['text']}",
-                    callback_data=f"{del_prefix}{idx}",
-                    style="danger",
+    normalized = normalize_buttons(buttons)
+    grouped = group_buttons_by_row(normalized)
+    rows: List[List[InlineKeyboardButton]] = []
+
+    for row_items in grouped:
+        kb_row: List[InlineKeyboardButton] = []
+        for idx, b in row_items:
+            s_icon = STYLE_ICONS.get(b.get("style"), "⚪")
+            t_icon = TYPE_ICONS.get(b.get("type", "url"), "🔗")
+            short_lbl = b["text"] if len(b["text"]) <= 18 else b["text"][:17] + "…"
+            kb_row.append(
+                ib_exact(
+                    f"{s_icon}{t_icon} {short_lbl}",
+                    style=b.get("style"),
+                    callback_data=f"{inspect_prefix}{idx}",
                 )
-            ]
-        )
+            )
+        rows.append(kb_row)
+
     rows.append(
         [ib("➕ افزودن دکمه جدید", callback_data=add_callback, style="success")]
     )
@@ -268,6 +293,79 @@ def post_buttons_manage_keyboard(
         [ib("◀️ بازگشت", callback_data=back_callback, style="danger")]
     )
     return InlineKeyboardMarkup(rows)
+
+
+def post_button_type_keyboard(
+    select_prefix: str = "pb:btn_type:",
+    back_callback: str = "pb:btns",
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [ib("🔗 دکمه لینکدار (URL)", callback_data=f"{select_prefix}url", style="primary")],
+            [ib("💬 دکمه نمایشی (پاپ‌آپ بدون لینک)", callback_data=f"{select_prefix}popup", style="primary")],
+            [ib("📋 دکمه کپی متن", callback_data=f"{select_prefix}copy", style="primary")],
+            [ib("◀️ بازگشت", callback_data=back_callback, style="danger")],
+        ]
+    )
+
+
+def post_button_inspector_keyboard(
+    buttons: List[Dict[str, Any]],
+    idx: int,
+    prefix: str = "pb",
+    back_callback: str = "pb:btns",
+) -> InlineKeyboardMarkup:
+    normalized = normalize_buttons(buttons)
+    cur = normalized[idx]
+    cur_style = cur.get("style")
+    cur_row = cur["row"]
+    same_row_count = sum(1 for b in normalized if b["row"] == cur_row)
+
+    color_choices = [
+        ("⚪ شفاف", "none", None),
+        ("🔵 آبی", "primary", "primary"),
+        ("🟢 سبز", "success", "success"),
+        ("🔴 قرمز", "danger", "danger"),
+    ]
+    color_row = []
+    for label, token, style_val in color_choices:
+        mark = "✓ " if cur_style == style_val else ""
+        color_row.append(
+            ib_exact(
+                f"{mark}{label}",
+                style=style_val,
+                callback_data=f"{prefix}:btn_col:{idx}:{token}",
+            )
+        )
+
+    pos_row_1 = [
+        ib("⬆️ ردیف بالا", callback_data=f"{prefix}:btn_row_up:{idx}", style="primary"),
+        ib("⬇️ ردیف پایین", callback_data=f"{prefix}:btn_row_dn:{idx}", style="primary"),
+    ]
+    pos_row_2 = [
+        ib("⬅️ چپ", callback_data=f"{prefix}:btn_left:{idx}", style="primary"),
+        ib("➡️ راست", callback_data=f"{prefix}:btn_right:{idx}", style="primary"),
+    ]
+    if same_row_count > 1:
+        pos_row_2.append(
+            ib("➖ ردیف جدا", callback_data=f"{prefix}:btn_split:{idx}", style="primary")
+        )
+
+    return InlineKeyboardMarkup(
+        [
+            color_row,
+            pos_row_1,
+            pos_row_2,
+            [
+                ib("✏️ تغییر متن", callback_data=f"{prefix}:btn_etxt:{idx}", style="primary"),
+                ib("🔀 تغییر نوع / مقدار", callback_data=f"{prefix}:btn_eval:{idx}", style="primary"),
+            ],
+            [
+                ib("🗑 حذف دکمه", callback_data=f"{prefix}:btn_del:{idx}", style="danger"),
+                ib("◀️ بازگشت", callback_data=back_callback, style="danger"),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
