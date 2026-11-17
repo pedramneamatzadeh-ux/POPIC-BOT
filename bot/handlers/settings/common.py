@@ -1,4 +1,4 @@
-"""متون پنل، هلپرها و لغو گفتگوی تنظیمات."""
+"""متون پنل، هلپرها و لغو گفتگوی تنظیمات فضای کاری."""
 
 import logging
 from typing import Optional
@@ -7,15 +7,14 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ...config import config
 from ...constants import (
     BOT_VERSION,
     BOT_VERSION_DATE,
     SETTINGS_PANEL,
     Msg,
 )
-from ...database import db
-from ...decorators import owner_only
+from ...database import get_workspace_db, registry
+from ...decorators import workspace_owner_only
 from ...keyboards import main_menu_for, settings_input_keyboard
 
 logger = logging.getLogger(__name__)
@@ -23,23 +22,21 @@ logger = logging.getLogger(__name__)
 _CANCEL_TEXTS = ("لغو", "بازگشت به منوی اصلی")
 
 
-def _panel_text() -> str:
-    owner_id = config.OWNER_ID
-    admins = [
-        item for item in (config.ADMIN_IDS or []) if item != owner_id
-    ]
-    channels = db.get_target_channels()
-    pos = "بالای متن ⬆️" if config.DEFAULT_SHOW_ABOVE_TEXT else "پایین متن ⬇️"
-    size = "بزرگ 🖼" if config.DEFAULT_PREFER_LARGE_MEDIA else "کوچک 🖼"
+def _panel_text(owner_id: int) -> str:
+    ws_db = get_workspace_db(owner_id)
+    admins = registry.get_workspace_admins(owner_id)
+    channels = ws_db.get_target_channels()
+    pos = "بالای متن ⬆️" if ws_db.get_show_above_text() else "پایین متن ⬇️"
+    size = "بزرگ 🖼" if ws_db.get_prefer_large_media() else "کوچک 🖼"
 
     return "\n".join(
         [
             Msg.SETTINGS_TITLE,
             "",
-            f"👨‍💼 ادمین‌ها: {len(admins)} نفر (به‌علاوه مالک 👑)",
+            f"👨‍💼 ادمین‌های فضای شما: {len(admins)} نفر (به‌علاوه شما 👑)",
             f"📢 کانال‌های مقصد: {len(channels)}",
             f"🖼 پیش‌فرض پیش‌نمایش: {pos} | {size}",
-            f"🏷 متن پیش‌فرض دکمه: «{config.DEFAULT_BUTTON_TEXT}»",
+            f"🏷 متن پیش‌فرض دکمه: «{ws_db.get_default_button_text()}»",
             f"🧩 نسخه: {BOT_VERSION} ({BOT_VERSION_DATE})",
         ]
     )
@@ -48,7 +45,7 @@ def _panel_text() -> str:
 def _user_names() -> dict:
     names = {}
     try:
-        for row in db.get_all_users():
+        for row in registry.get_all_users():
             display = " ".join(
                 part
                 for part in (
@@ -66,26 +63,21 @@ def _user_names() -> dict:
     return names
 
 
-def _admin_names() -> dict:
+def _admin_names(owner_id: int) -> dict:
     names = _user_names()
-    owner = config.OWNER_ID
-    if owner in names:
-        names[owner] = f"{names[owner]} 👑"
+    if owner_id in names:
+        names[owner_id] = f"{names[owner_id]} 👑"
     return names
 
 
-def _admins_text() -> str:
-    owner_id = config.OWNER_ID
+def _admins_text(owner_id: int) -> str:
     names = _user_names()
-    lines = ["👨‍💼 ادمین‌ها", ""]
+    lines = ["👨‍💼 ادمین‌های فضای شما", ""]
 
-    if owner_id is not None:
-        owner_name = names.get(owner_id) or "—"
-        lines.append(f"👑 {owner_name} — {owner_id} (مالک، ثابت)")
+    owner_name = names.get(owner_id) or "—"
+    lines.append(f"👑 {owner_name} — {owner_id} (مالک، ثابت)")
 
-    others = [
-        item for item in (config.ADMIN_IDS or []) if item != owner_id
-    ]
+    others = registry.get_workspace_admins(owner_id)
     if others:
         lines.extend(
             f"👤 {names.get(int(item)) or '—'} — {item}"
@@ -97,9 +89,10 @@ def _admins_text() -> str:
     return "\n".join(lines)
 
 
-def _channels_text() -> str:
-    channels = db.get_target_channels()
-    lines = ["📢 کانال‌های مقصد", ""]
+def _channels_text(owner_id: int) -> str:
+    ws_db = get_workspace_db(owner_id)
+    channels = ws_db.get_target_channels()
+    lines = ["📢 کانال‌های مقصد فضای شما", ""]
 
     if not channels:
         lines.append("— هیچ کانال مقصدی ثبت نشده است")
@@ -112,16 +105,17 @@ def _channels_text() -> str:
     return "\n".join(lines)
 
 
-def _preview_text() -> str:
-    pos = "⬆️ بالای متن" if config.DEFAULT_SHOW_ABOVE_TEXT else "⬇️ پایین متن"
-    size = "🖼 بزرگ" if config.DEFAULT_PREFER_LARGE_MEDIA else "🖼 کوچک"
+def _preview_text(owner_id: int) -> str:
+    ws_db = get_workspace_db(owner_id)
+    pos = "⬆️ بالای متن" if ws_db.get_show_above_text() else "⬇️ پایین متن"
+    size = "🖼 بزرگ" if ws_db.get_prefer_large_media() else "🖼 کوچک"
     return "\n".join(
         [
             "🖼 تنظیمات پیش‌فرض پیش‌نمایش و دکمه",
             "",
             f"• محل پیش‌نمایش: {pos}",
             f"• اندازه پیش‌نمایش: {size}",
-            f"• متن پیش‌فرض دکمه شیشه‌ای: «{config.DEFAULT_BUTTON_TEXT}»",
+            f"• متن پیش‌فرض دکمه شیشه‌ای: «{ws_db.get_default_button_text()}»",
         ]
     )
 
@@ -222,7 +216,7 @@ async def _handle_text_cancel(
     return None
 
 
-@owner_only
+@workspace_owner_only
 async def cancel_settings(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

@@ -1,9 +1,4 @@
-"""انحصار پنل‌ها (الگوی P16 + R15).
-
-با فشار هر دکمهٔ پنل در منوی اصلی، اول پیام‌های پنل قبلی به «🚫 پنل بسته شد.»
-ویرایش و دکمه‌هایشان حذف می‌شود، سپس state همه‌ی پنل‌های بازِ همان
-(chat, user) پاک می‌شود تا پنل جدید تمیز باز شود.
-"""
+"""انحصار پنل‌ها (الگوی P16 + R15)."""
 
 import logging
 import re
@@ -12,7 +7,7 @@ from typing import Dict, Optional
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..constants import SETTINGS_BUTTON, Msg
+from ..constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON, Msg
 from ..utils import PANEL_MSG_KEY
 
 logger = logging.getLogger(__name__)
@@ -22,6 +17,7 @@ PANEL_BUTTONS = (
     "📂 پست‌های ذخیره‌شده",
     "📊 آمار",
     SETTINGS_BUTTON,
+    SWITCH_WORKSPACE_BUTTON,
 )
 
 PANEL_BUTTONS_PATTERN = (

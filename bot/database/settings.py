@@ -1,9 +1,8 @@
-"""تنظیمات کلید-مقدار (جدول settings) + همگام‌سازی با config."""
+"""تنظیمات کلید-مقدار اختصاصی هر فضای کاری (بدون تغییر config سراسری)."""
 
 import json
 import logging
-import sqlite3
-from typing import Any, Dict, List
+from typing import Any
 
 from ..config import config
 
@@ -40,82 +39,20 @@ class SettingsMixin:
                 (key, json.dumps(value, ensure_ascii=False)),
             )
 
-        self._apply_settings_to_config({key: value})
+    def get_show_above_text(self) -> bool:
+        val = self.get_setting("default_show_above_text", None)
+        if val is None:
+            return config.DEFAULT_SHOW_ABOVE_TEXT
+        return bool(val)
 
-    def _import_env_settings(self, connection: sqlite3.Connection) -> None:
-        env_values: Dict[str, Any] = {
-            "admin_ids": config.ADMIN_IDS or None,
-        }
+    def get_prefer_large_media(self) -> bool:
+        val = self.get_setting("default_prefer_large_media", None)
+        if val is None:
+            return config.DEFAULT_PREFER_LARGE_MEDIA
+        return bool(val)
 
-        for key, value in env_values.items():
-            if value is None or value == []:
-                continue
-
-            exists = connection.execute(
-                "SELECT 1 FROM settings WHERE key = ?",
-                (key,),
-            ).fetchone()
-
-            if exists:
-                continue
-
-            connection.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?)",
-                (key, json.dumps(value, ensure_ascii=False)),
-            )
-            logger.info("تنظیم «%s» از env به دیتابیس منتقل شد.", key)
-
-    def _load_settings(self, connection: sqlite3.Connection) -> None:
-        rows = connection.execute(
-            "SELECT key, value FROM settings"
-        ).fetchall()
-
-        if not rows:
-            return
-
-        data: Dict[str, Any] = {}
-        for row in rows:
-            try:
-                data[row["key"]] = json.loads(row["value"])
-            except (TypeError, ValueError):
-                logger.warning("مقدار JSON نامعتبر در settings: %s", row["key"])
-
-        self._apply_settings_to_config(data)
-
-    def _apply_settings_to_config(self, data: Dict[str, Any]) -> None:
-        admin_ids = data.get("admin_ids")
-
-        if isinstance(admin_ids, list):
-            valid_ids: List[int] = []
-            invalid_ids: List[Any] = []
-            for item in admin_ids:
-                try:
-                    value = int(str(item).strip())
-                except (TypeError, ValueError):
-                    invalid_ids.append(item)
-                    continue
-                if value > 0:
-                    valid_ids.append(value)
-                else:
-                    invalid_ids.append(item)
-
-            if invalid_ids:
-                logger.warning(
-                    "admin_ids: %s مقدار نامعتبر حذف شد.",
-                    invalid_ids,
-                )
-            config.ADMIN_IDS = valid_ids
-
-        if "default_show_above_text" in data:
-            config.DEFAULT_SHOW_ABOVE_TEXT = bool(
-                data["default_show_above_text"]
-            )
-
-        if "default_prefer_large_media" in data:
-            config.DEFAULT_PREFER_LARGE_MEDIA = bool(
-                data["default_prefer_large_media"]
-            )
-
-        btn_text = data.get("default_button_text")
-        if isinstance(btn_text, str) and btn_text.strip():
-            config.DEFAULT_BUTTON_TEXT = btn_text.strip()[:64]
+    def get_default_button_text(self) -> str:
+        val = self.get_setting("default_button_text", None)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:64]
+        return config.DEFAULT_BUTTON_TEXT

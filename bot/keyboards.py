@@ -7,8 +7,8 @@ from telegram import (
     ReplyKeyboardMarkup,
 )
 
-from .config import config
-from .constants import SETTINGS_BUTTON
+from .constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON
+from .database import registry, resolve_user_workspace
 
 # ---------------------------------------------------------------------------
 # رنگ دکمه‌ها (Bot API 9.4 — style: primary/success/danger)
@@ -18,7 +18,6 @@ _RED_WORDS = ("خیر", "بازگشت", "منوی اصلی", "حذف", "لغو",
 
 
 def _infer_style(text: str, callback_data: str = "") -> Optional[str]:
-    """استنتاج رنگ دکمه از برچسب/داده callback وقتی style صریح نباشد."""
     if any(word in text for word in _RED_WORDS):
         return "danger"
     if any(
@@ -34,7 +33,6 @@ def ib(
     style: Optional[str] = None,
     **kwargs,
 ) -> InlineKeyboardButton:
-    """InlineKeyboardButton با رنگ خودکار؛ style صریح مقدم است."""
     if style is None:
         style = _infer_style(text, str(kwargs.get("callback_data") or ""))
     if style:
@@ -42,51 +40,93 @@ def ib(
     return InlineKeyboardButton(text, **kwargs)
 
 
-MAIN_MENU_ROWS = [
-    ["📝 ساخت پست جدید", "📂 پست‌های ذخیره‌شده"],
-    ["📊 آمار", "💾 بک‌آپ"],
-]
-
 MAIN_MENU_STYLES = {
     "📝 ساخت پست جدید": "success",
     "📂 پست‌های ذخیره‌شده": "primary",
     "📊 آمار": "primary",
+    SWITCH_WORKSPACE_BUTTON: "primary",
     SETTINGS_BUTTON: "danger",
     "💾 بک‌آپ": "danger",
 }
 
 
-def _main_menu_row(row: list) -> list:
+def _menu_row(row: list) -> list:
     return [
         KeyboardButton(text, style=MAIN_MENU_STYLES.get(text, "primary"))
         for text in row
     ]
 
 
-MAIN_MENU = ReplyKeyboardMarkup(
-    [_main_menu_row(row) for row in MAIN_MENU_ROWS],
-    resize_keyboard=True,
-)
+def build_main_menu(
+    is_owner: bool = True,
+    has_admin_roles: bool = False,
+) -> ReplyKeyboardMarkup:
+    rows: List[List[str]] = [
+        ["📝 ساخت پست جدید", "📂 پست‌های ذخیره‌شده"],
+    ]
+
+    if is_owner:
+        rows.append(["📊 آمار", "💾 بک‌آپ"])
+        last_row = [SETTINGS_BUTTON]
+        if has_admin_roles:
+            last_row.append(SWITCH_WORKSPACE_BUTTON)
+        rows.append(last_row)
+    else:
+        row2 = ["📊 آمار"]
+        if has_admin_roles:
+            row2.append(SWITCH_WORKSPACE_BUTTON)
+        rows.append(row2)
+
+    return ReplyKeyboardMarkup(
+        [_menu_row(r) for r in rows],
+        resize_keyboard=True,
+    )
 
 
 def main_menu_for(user_id: Optional[int]) -> ReplyKeyboardMarkup:
-    """منوی اصلی بر اساس نقش: مالک و ادمین‌ها «⚙️ تنظیمات» را می‌بینند
-    ولی اجرای آن فقط برای مالک مجاز است."""
-    rows = [_main_menu_row(row) for row in MAIN_MENU_ROWS]
+    """منوی اصلی بر اساس نقش فعال کاربر (مالک فضای شخصی یا ادمینِ فضای دیگر)."""
+    if user_id is None:
+        return build_main_menu(is_owner=True, has_admin_roles=False)
 
-    if user_id is not None and (
-        user_id == config.OWNER_ID
-        or user_id in config.ADMIN_IDS
-    ):
-        rows[-1] = rows[-1] + [
-            KeyboardButton(SETTINGS_BUTTON, style="danger")
+    _, status, _ = resolve_user_workspace(user_id)
+    is_owner = status != "admin"
+    has_admin_roles = bool(registry.get_admin_workspaces(user_id))
+    return build_main_menu(
+        is_owner=is_owner,
+        has_admin_roles=has_admin_roles,
+    )
+
+
+def workspace_choice_keyboard(
+    user_id: int,
+    admin_workspaces: List[Dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            ib(
+                "👑 ورود به عنوان مالک (دیتابیس شخصی خودم)",
+                callback_data=f"ws_pick:{int(user_id)}",
+                style="success",
+            )
         ]
-
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    ]
+    for ws in admin_workspaces:
+        owner_id = ws["workspace_owner_id"]
+        owner_name = ws.get("owner_display") or str(owner_id)
+        rows.append(
+            [
+                ib(
+                    f"👨‍💼 ادمینِ «{owner_name}»",
+                    callback_data=f"ws_pick:{owner_id}",
+                    style="primary",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 # ---------------------------------------------------------------------------
-# دکمه‌های لغو اینلاین + تأیید لغو (الگوی R17/R23)
+# دکمه‌های لغو اینلاین + تأیید لغو
 # ---------------------------------------------------------------------------
 
 POST_CANCEL_INLINE = InlineKeyboardMarkup(
@@ -174,7 +214,7 @@ def post_preview_controls_keyboard(
                 ib("🖼 تغییر لینک عکس", callback_data="pb:edit_link", style="primary"),
             ],
             [
-                ib("✅ پایان و منوی اصلی", callback_data="pb:done", style="success"),
+                ib("✅ ذخیره و منوی اصلی", callback_data="pb:done", style="success"),
                 ib("❌ لغو", callback_data="cancel_prompt", style="danger"),
             ],
         ]
@@ -206,6 +246,9 @@ def post_channels_keyboard(
 
 def post_buttons_manage_keyboard(
     buttons: List[Dict[str, str]],
+    add_callback: str = "pb:btn_add",
+    del_prefix: str = "pb:btn_del:",
+    back_callback: str = "pb:back_preview",
 ) -> InlineKeyboardMarkup:
     rows = []
     for idx, btn in enumerate(buttons):
@@ -213,16 +256,16 @@ def post_buttons_manage_keyboard(
             [
                 ib(
                     f"🗑 حذف: {btn['text']}",
-                    callback_data=f"pb:btn_del:{idx}",
+                    callback_data=f"{del_prefix}{idx}",
                     style="danger",
                 )
             ]
         )
     rows.append(
-        [ib("➕ افزودن دکمه جدید", callback_data="pb:btn_add", style="success")]
+        [ib("➕ افزودن دکمه جدید", callback_data=add_callback, style="success")]
     )
     rows.append(
-        [ib("◀️ بازگشت به پیش‌نمایش", callback_data="pb:back_preview", style="danger")]
+        [ib("◀️ بازگشت", callback_data=back_callback, style="danger")]
     )
     return InlineKeyboardMarkup(rows)
 
@@ -271,8 +314,15 @@ def post_manage_list_keyboard(
 
 def post_manage_detail_keyboard(
     post: Dict[str, Any],
+    buttons_count: int = 0,
 ) -> InlineKeyboardMarkup:
     post_id = post["id"]
+    btns_label = (
+        f"🔘 دکمه‌های شیشه‌ای ({buttons_count})"
+        if buttons_count
+        else "🔘 افزودن دکمه شیشه‌ای (اختیاری)"
+    )
+
     rows = [
         [
             ib("👁 ارسال پیش‌نمایش به پی‌وی", callback_data=f"pm:pv:{post_id}", style="success"),
@@ -293,6 +343,9 @@ def post_manage_detail_keyboard(
 
     rows.extend(
         [
+            [
+                ib(btns_label, callback_data=f"pm:btns:{post_id}", style="primary"),
+            ],
             [
                 ib("✏️ ویرایش متن", callback_data=f"pm:edit_text:{post_id}", style="primary"),
                 ib("🖼 تغییر لینک عکس", callback_data=f"pm:edit_link:{post_id}", style="primary"),
@@ -319,7 +372,7 @@ def post_manage_detail_keyboard(
 
 
 # ---------------------------------------------------------------------------
-# کیبوردهای پنل تنظیمات (فقط مالک)
+# کیبوردهای پنل تنظیمات (فقط مالک فضای کاری)
 # ---------------------------------------------------------------------------
 
 def settings_panel_keyboard() -> InlineKeyboardMarkup:

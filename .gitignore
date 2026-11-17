@@ -9,7 +9,8 @@ env/
 # Environment & Secrets
 .env
 
-# SQLite Databases
+# SQLite Databases & Workspace Data
+data/
 *.db
 *.db-wal
 *.db-shm

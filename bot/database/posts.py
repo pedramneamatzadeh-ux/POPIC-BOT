@@ -1,4 +1,4 @@
-"""ذخیره، بازیابی و آمار پست‌ها."""
+"""ذخیره، بازیابی و آمار پست‌های فضای کاری."""
 
 from typing import Any, Dict, List, Optional
 
@@ -202,9 +202,6 @@ class PostsMixin:
             total_channels = connection.execute(
                 "SELECT COUNT(*) FROM target_channels"
             ).fetchone()[0]
-            total_users = connection.execute(
-                "SELECT COUNT(*) FROM users"
-            ).fetchone()[0]
 
         return {
             "total_posts": total_posts,
@@ -213,5 +210,4 @@ class PostsMixin:
             "channel_deliveries": channel_deliveries,
             "pv_deliveries": pv_deliveries,
             "total_channels": total_channels,
-            "total_users": total_users,
         }

@@ -1,6 +1,7 @@
-"""هسته: اتصال، اسکیما و WAL."""
+"""هستهٔ دیتابیس اختصاصی هر فضای کاری."""
 
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 
@@ -13,6 +14,9 @@ class CoreMixin:
 
     @contextmanager
     def connect(self):
+        parent = os.path.dirname(os.path.abspath(self.path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -29,15 +33,6 @@ class CoreMixin:
         with self.connect() as connection:
             connection.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
@@ -95,13 +90,7 @@ class CoreMixin:
                     ON post_deliveries(post_id);
                 """
             )
-
             connection.execute("PRAGMA journal_mode = WAL")
-
-            self._import_env_settings(connection)
-            self._load_settings(connection)
-
-        logger.info("دیتابیس بررسی و آماده شد.")
 
     def wal_checkpoint(self) -> None:
         """محتوای WAL را به فایل اصلی دیتابیس منتقل می‌کند (پیش از بک‌آپ)."""

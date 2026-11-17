@@ -1,4 +1,4 @@
-"""مدیریت پست‌های ذخیره‌شده: فهرست صفحه‌بندی‌شده، پیش‌نمایش، انتشار، ویرایش و حذف."""
+"""مدیریت پست‌های ذخیره‌شده: فهرست، پیش‌نمایش، انتشار، دکمه‌های شیشه‌ای، ویرایش و حذف."""
 
 import html
 import logging
@@ -10,7 +10,11 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import config
 from ..constants import (
+    MAX_BUTTON_TEXT_LENGTH,
+    MAX_EXTRA_BUTTONS,
     MAX_POST_TEXT_LENGTH,
+    PM_ADD_BTN_TEXT,
+    PM_ADD_BTN_URL,
     PM_DETAIL,
     PM_EDIT_LINK,
     PM_EDIT_TEXT,
@@ -18,10 +22,10 @@ from ..constants import (
     PM_SELECT_CHANNEL,
     Msg,
 )
-from ..database import db
-from ..decorators import admin_only
+from ..decorators import workspace_access
 from ..keyboards import (
     input_back_keyboard,
+    post_buttons_manage_keyboard,
     post_channels_keyboard,
     post_manage_detail_keyboard,
     post_manage_list_keyboard,
@@ -31,6 +35,7 @@ from ..services.publisher import (
     deserialize_buttons,
     edit_post_in_chat,
     send_post_to_chat,
+    serialize_buttons,
     serialize_entities,
 )
 from ..utils import (
@@ -75,7 +80,7 @@ def _detail_text(post: Dict[str, Any]) -> str:
         f"• طول متن: {len(post.get('post_text') or '')} کاراکتر",
         f"• لینک عکس: {html.escape(post.get('photo_url') or '')}",
         f"• پیش‌نمایش: {pos} | اندازه: {size}",
-        f"• دکمهٔ شیشه‌ای: {len(buttons)}",
+        f"• دکمه‌های شیشه‌ای: {len(buttons)}",
         f"• تاریخ ثبت: {html.escape(fmt_tehran(post.get('created_at')))}",
     ]
 
@@ -98,15 +103,16 @@ def _detail_text(post: Dict[str, Any]) -> str:
 
 async def _render_list(
     context: ContextTypes.DEFAULT_TYPE,
+    ws_db: Any,
     chat_id: int,
     page: int = 0,
     message_id: int | None = None,
 ) -> int:
-    total = db.count_posts()
+    total = ws_db.count_posts()
     pages = total_pages(total, config.PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     offset = page * config.PAGE_SIZE
-    posts = db.list_posts(limit=config.PAGE_SIZE, offset=offset)
+    posts = ws_db.list_posts(limit=config.PAGE_SIZE, offset=offset)
 
     pm = context.user_data.setdefault("pm", {})
     pm["page"] = page
@@ -125,23 +131,25 @@ async def _render_list(
 
 async def _render_detail(
     context: ContextTypes.DEFAULT_TYPE,
+    ws_db: Any,
     chat_id: int,
     post_id: int,
     message_id: int | None = None,
 ) -> int:
-    post = db.get_post(post_id)
+    post = ws_db.get_post(post_id)
     pm = context.user_data.setdefault("pm", {})
     if not post:
         return await _render_list(
-            context, chat_id, pm.get("page", 0), message_id=message_id
+            context, ws_db, chat_id, pm.get("page", 0), message_id=message_id
         )
 
     pm["post_id"] = post_id
+    buttons = deserialize_buttons(post.get("buttons_json"))
     mid = await safe_edit_or_send(
         context=context,
         chat_id=chat_id,
         text=_detail_text(post),
-        reply_markup=post_manage_detail_keyboard(post),
+        reply_markup=post_manage_detail_keyboard(post, buttons_count=len(buttons)),
         message_id=message_id,
         parse_mode="HTML",
     )
@@ -149,24 +157,58 @@ async def _render_detail(
     return PM_DETAIL
 
 
-@admin_only
+async def _render_buttons_panel(
+    context: ContextTypes.DEFAULT_TYPE,
+    ws_db: Any,
+    chat_id: int,
+    post_id: int,
+    message_id: int | None = None,
+) -> int:
+    post = ws_db.get_post(post_id)
+    pm = context.user_data.setdefault("pm", {})
+    if not post:
+        return await _render_list(
+            context, ws_db, chat_id, pm.get("page", 0), message_id=message_id
+        )
+
+    pm["post_id"] = post_id
+    buttons = deserialize_buttons(post.get("buttons_json"))
+    mid = await safe_edit_or_send(
+        context=context,
+        chat_id=chat_id,
+        text=f"🔘 مدیریت دکمه‌های شیشه‌ای اختیاری پست #{post_id}:",
+        reply_markup=post_buttons_manage_keyboard(
+            buttons,
+            add_callback=f"pm:btn_add:{post_id}",
+            del_prefix=f"pm:btn_del:{post_id}:",
+            back_callback=f"pm:detail:{post_id}",
+        ),
+        message_id=message_id,
+    )
+    pm["msg_id"] = mid
+    return PM_DETAIL
+
+
+@workspace_access
 async def start_post_manage(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    ws_db = context.user_data["_ws_db"]
     context.user_data["pm"] = {"page": 0}
-    return await _render_list(context, update.message.chat_id, page=0)
+    return await _render_list(context, ws_db, update.message.chat_id, page=0)
 
 
 async def _publish_saved_post(
     context: ContextTypes.DEFAULT_TYPE,
+    ws_db: Any,
     query,
     post_id: int,
     channel_id: int,
     user_id: int,
 ) -> tuple[int, str]:
-    post = db.get_post(post_id)
-    channel = db.get_target_channel(channel_id)
+    post = ws_db.get_post(post_id)
+    channel = ws_db.get_target_channel(channel_id)
     if not post or not channel:
         return PM_DETAIL, "❌ پست یا کانال پیدا نشد."
 
@@ -185,14 +227,14 @@ async def _publish_saved_post(
     except TelegramError as exc:
         return PM_DETAIL, Msg.CHANNEL_SEND_FAILED.format(error=exc)
 
-    db.mark_post_published(
+    ws_db.mark_post_published(
         post_id=post_id,
         channel_chat_id=channel["chat_id"],
         channel_message_id=sent.message_id,
         channel_title=channel.get("title") or "",
         channel_username=channel.get("username") or "",
     )
-    db.record_delivery(
+    ws_db.record_delivery(
         post_id=post_id,
         target_type="channel",
         target_chat_id=channel["chat_id"],
@@ -202,19 +244,21 @@ async def _publish_saved_post(
 
     chat_id = query.message.chat_id if query.message else user_id
     msg_id = query.message.message_id if query.message else None
-    await _render_detail(context, chat_id, post_id, message_id=msg_id)
+    await _render_detail(context, ws_db, chat_id, post_id, message_id=msg_id)
     return PM_DETAIL, "✅ پست در کانال منتشر شد!"
 
 
-@admin_only
+@workspace_access
 async def handle_post_manage_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
+    user_id = update.effective_user.id
+    ws_db = context.user_data["_ws_db"]
     data = (query.data or "").strip()
     pm = context.user_data.setdefault("pm", {})
-    chat_id = query.message.chat_id if query.message else update.effective_user.id
+    chat_id = query.message.chat_id if query.message else user_id
     msg_id = query.message.message_id if query.message else pm.get("msg_id")
 
     if data == "pm:close":
@@ -223,33 +267,91 @@ async def handle_post_manage_callback(
             await query.edit_message_text("✅ پنل مدیریت پست‌ها بسته شد.")
         except TelegramError:
             pass
-        await go_to_main_menu(context, chat_id)
+        await go_to_main_menu(context, chat_id, user_id=user_id)
         context.user_data.pop("pm", None)
         return ConversationHandler.END
 
     if data == "pm:list":
         await query.answer()
         return await _render_list(
-            context, chat_id, pm.get("page", 0), message_id=msg_id
+            context, ws_db, chat_id, pm.get("page", 0), message_id=msg_id
         )
 
     if data.startswith("pm:page:"):
         raw = data.split(":", 2)[2]
         page = int(raw) if raw.lstrip("-").isdigit() else 0
         await query.answer()
-        return await _render_list(context, chat_id, page, message_id=msg_id)
+        return await _render_list(context, ws_db, chat_id, page, message_id=msg_id)
 
     if data.startswith("pm:detail:"):
         raw = data.split(":", 2)[2]
         if not raw.isdigit():
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return PM_LIST
+        pm.pop("pending_btn_label", None)
         await query.answer()
-        return await _render_detail(context, chat_id, int(raw), message_id=msg_id)
+        return await _render_detail(context, ws_db, chat_id, int(raw), message_id=msg_id)
+
+    if data.startswith("pm:btns:"):
+        raw = data.split(":", 2)[2]
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        pm.pop("pending_btn_label", None)
+        await query.answer()
+        return await _render_buttons_panel(
+            context, ws_db, chat_id, int(raw), message_id=msg_id
+        )
+
+    if data.startswith("pm:btn_add:"):
+        raw = data.split(":", 2)[2]
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
+        if not post:
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        buttons = deserialize_buttons(post.get("buttons_json"))
+        if len(buttons) >= MAX_EXTRA_BUTTONS:
+            await query.answer(
+                f"❌ حداکثر {MAX_EXTRA_BUTTONS} دکمه مجاز است.",
+                show_alert=True,
+            )
+            return PM_DETAIL
+        pm["post_id"] = post["id"]
+        pm["msg_id"] = msg_id
+        await query.answer()
+        await safe_edit_or_send(
+            context=context,
+            chat_id=chat_id,
+            text=Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
+            reply_markup=input_back_keyboard(f"pm:btns:{post['id']}"),
+            message_id=msg_id,
+        )
+        return PM_ADD_BTN_TEXT
+
+    if data.startswith("pm:btn_del:"):
+        parts = data.split(":")
+        if len(parts) != 4 or not (parts[2].isdigit() and parts[3].isdigit()):
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return PM_DETAIL
+        post_id, idx = int(parts[2]), int(parts[3])
+        post = ws_db.get_post(post_id)
+        if not post:
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        buttons = deserialize_buttons(post.get("buttons_json"))
+        if not 0 <= idx < len(buttons):
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return PM_DETAIL
+        buttons.pop(idx)
+        ws_db.update_post(post_id, buttons_json=serialize_buttons(buttons))
+        await query.answer("🗑 دکمه حذف شد.")
+        return await _render_buttons_panel(
+            context, ws_db, chat_id, post_id, message_id=msg_id
+        )
 
     if data.startswith("pm:pv:"):
         raw = data.split(":", 2)[2]
-        post = db.get_post(int(raw)) if raw.isdigit() else None
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
         if not post:
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
@@ -264,12 +366,12 @@ async def handle_post_manage_callback(
                 prefer_large_media=bool(post.get("prefer_large_media")),
                 buttons=deserialize_buttons(post.get("buttons_json")),
             )
-            db.record_delivery(
+            ws_db.record_delivery(
                 post_id=post["id"],
                 target_type="pv",
                 target_chat_id=chat_id,
                 message_id=sent.message_id,
-                sent_by=update.effective_user.id,
+                sent_by=user_id,
             )
             await query.answer("✅ پست در پی‌وی ارسال شد.")
         except TelegramError as exc:
@@ -278,17 +380,17 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:send_ch:"):
         raw = data.split(":", 2)[2]
-        if not raw.isdigit() or not db.get_post(int(raw)):
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
         post_id = int(raw)
-        channels = db.get_target_channels()
+        channels = ws_db.get_target_channels()
         if not channels:
             await query.answer(Msg.NO_CHANNELS_CONFIGURED, show_alert=True)
             return PM_DETAIL
         if len(channels) == 1:
             next_state, alert = await _publish_saved_post(
-                context, query, post_id, channels[0]["id"], update.effective_user.id
+                context, ws_db, query, post_id, channels[0]["id"], user_id
             )
             await query.answer(alert, show_alert=True)
             return next_state
@@ -315,17 +417,18 @@ async def handle_post_manage_callback(
             return PM_DETAIL
         next_state, alert = await _publish_saved_post(
             context,
+            ws_db,
             query,
             int(parts[2]),
             int(parts[3]),
-            update.effective_user.id,
+            user_id,
         )
         await query.answer(alert, show_alert=True)
         return next_state
 
     if data.startswith("pm:update_ch:"):
         raw = data.split(":", 2)[2]
-        post = db.get_post(int(raw)) if raw.isdigit() else None
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
         if (
             not post
             or not post.get("target_channel_id")
@@ -352,33 +455,33 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:toggle_pos:"):
         raw = data.split(":", 2)[2]
-        post = db.get_post(int(raw)) if raw.isdigit() else None
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
         if not post:
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
-        db.update_post(
+        ws_db.update_post(
             post["id"],
             show_above_text=not bool(post.get("show_above_text")),
         )
         await query.answer("✅ جای پیش‌نمایش تغییر کرد.")
-        return await _render_detail(context, chat_id, post["id"], message_id=msg_id)
+        return await _render_detail(context, ws_db, chat_id, post["id"], message_id=msg_id)
 
     if data.startswith("pm:toggle_size:"):
         raw = data.split(":", 2)[2]
-        post = db.get_post(int(raw)) if raw.isdigit() else None
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
         if not post:
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
-        db.update_post(
+        ws_db.update_post(
             post["id"],
             prefer_large_media=not bool(post.get("prefer_large_media")),
         )
         await query.answer("✅ اندازه پیش‌نمایش تغییر کرد.")
-        return await _render_detail(context, chat_id, post["id"], message_id=msg_id)
+        return await _render_detail(context, ws_db, chat_id, post["id"], message_id=msg_id)
 
     if data.startswith("pm:edit_text:"):
         raw = data.split(":", 2)[2]
-        if not raw.isdigit() or not db.get_post(int(raw)):
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
         pm["post_id"] = int(raw)
@@ -395,7 +498,7 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:edit_link:"):
         raw = data.split(":", 2)[2]
-        if not raw.isdigit() or not db.get_post(int(raw)):
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
         pm["post_id"] = int(raw)
@@ -412,17 +515,17 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:del_yes:"):
         raw = data.split(":", 2)[2]
-        if raw.isdigit() and db.delete_post(int(raw)):
+        if raw.isdigit() and ws_db.delete_post(int(raw)):
             await query.answer("🗑 پست حذف شد.", show_alert=True)
         else:
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
         return await _render_list(
-            context, chat_id, pm.get("page", 0), message_id=msg_id
+            context, ws_db, chat_id, pm.get("page", 0), message_id=msg_id
         )
 
     if data.startswith("pm:del:"):
         raw = data.split(":", 2)[2]
-        if not raw.isdigit() or not db.get_post(int(raw)):
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
         await query.answer()
@@ -442,12 +545,13 @@ async def handle_post_manage_callback(
     return PM_LIST
 
 
-@admin_only
+@workspace_access
 async def receive_pm_edit_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pm = context.user_data.get("pm") or {}
     post_id = pm.get("post_id")
     if not post_id:
@@ -469,22 +573,23 @@ async def receive_pm_edit_text(
         register_panel_message(context, sent.message_id)
         return PM_EDIT_TEXT
 
-    db.update_post(
+    ws_db.update_post(
         post_id,
         post_text=message.text,
         entities_json=serialize_entities(message.entities),
     )
     return await _render_detail(
-        context, message.chat_id, post_id, message_id=pm.get("msg_id")
+        context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
     )
 
 
-@admin_only
+@workspace_access
 async def receive_pm_edit_link(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     message = update.message
+    ws_db = context.user_data["_ws_db"]
     pm = context.user_data.get("pm") or {}
     post_id = pm.get("post_id")
     if not post_id:
@@ -512,7 +617,103 @@ async def receive_pm_edit_link(
         register_panel_message(context, sent.message_id)
         return PM_EDIT_LINK
 
-    db.update_post(post_id, photo_url=photo_url)
+    ws_db.update_post(post_id, photo_url=photo_url)
     return await _render_detail(
-        context, message.chat_id, post_id, message_id=pm.get("msg_id")
+        context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
+    )
+
+
+@workspace_access
+async def receive_pm_btn_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    ws_db = context.user_data["_ws_db"]
+    pm = context.user_data.get("pm") or {}
+    post_id = pm.get("post_id")
+    if not post_id:
+        return ConversationHandler.END
+
+    default_label = ws_db.get_default_button_text()
+    raw = (message.text or "").strip()
+    label = default_label if raw == "-" else raw
+    if not 1 <= len(label) <= MAX_BUTTON_TEXT_LENGTH:
+        sent = await message.reply_text(
+            Msg.BTN_LABEL_INVALID,
+            reply_markup=input_back_keyboard(f"pm:btns:{post_id}"),
+        )
+        register_panel_message(context, sent.message_id)
+        return PM_ADD_BTN_TEXT
+
+    pm["pending_btn_label"] = label
+    try:
+        await message.delete()
+    except TelegramError:
+        pass
+    pm["msg_id"] = await safe_edit_or_send(
+        context=context,
+        chat_id=message.chat_id,
+        text=Msg.POST_ASK_BTN_URL.format(label=label),
+        reply_markup=input_back_keyboard(f"pm:btns:{post_id}"),
+        message_id=pm.get("msg_id"),
+        disable_web_page_preview=True,
+    )
+    return PM_ADD_BTN_URL
+
+
+@workspace_access
+async def receive_pm_btn_url(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    ws_db = context.user_data["_ws_db"]
+    pm = context.user_data.get("pm") or {}
+    post_id = pm.get("post_id")
+    if not post_id:
+        return ConversationHandler.END
+
+    fwd_url, fwd_status = extract_forward_post_link(message)
+    if fwd_status == "ok" and fwd_url:
+        url, err = fwd_url, ""
+    elif fwd_status == "private_channel":
+        url, err = None, "private"
+    else:
+        url, err = normalize_photo_url(message.text)
+
+    if not url and err == "private":
+        raw_text = (message.text or "").strip()
+        if raw_text.lower().startswith(("t.me/", "telegram.me/")):
+            url = f"https://{raw_text}"
+        elif raw_text.lower().startswith(("http://", "https://")):
+            url = raw_text
+
+    if not url:
+        sent = await message.reply_text(
+            Msg.POST_LINK_INVALID,
+            reply_markup=input_back_keyboard(f"pm:btns:{post_id}"),
+            disable_web_page_preview=True,
+        )
+        register_panel_message(context, sent.message_id)
+        return PM_ADD_BTN_URL
+
+    post = ws_db.get_post(post_id)
+    if not post:
+        return await _render_list(
+            context, ws_db, message.chat_id, pm.get("page", 0), message_id=pm.get("msg_id")
+        )
+
+    label = pm.pop("pending_btn_label", None) or ws_db.get_default_button_text()
+    buttons = deserialize_buttons(post.get("buttons_json"))
+    buttons.append({"text": label, "url": url})
+    ws_db.update_post(post_id, buttons_json=serialize_buttons(buttons))
+
+    try:
+        await message.delete()
+    except TelegramError:
+        pass
+
+    return await _render_buttons_panel(
+        context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
     )

@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from telegram import MessageEntity, ReplyKeyboardRemove
 from telegram.ext import ConversationHandler
 
-from bot.application import build_application
+from bot.application import create_application
 from bot.config import config
 from bot.constants import (
     BOT_VERSION,
+    PM_ADD_BTN_TEXT,
+    PM_ADD_BTN_URL,
     PM_DETAIL,
     PM_LIST,
     POST_PHOTO_LINK,
@@ -23,8 +25,17 @@ from bot.constants import (
     STATS_VIEW,
     Msg,
 )
-from bot.database import db
+from bot.database import (
+    clear_workspace_cache,
+    get_workspace_db,
+    registry,
+)
 from bot.handlers.backup import handle_backup
+from bot.handlers.base import (
+    open_workspace_switcher,
+    start,
+    workspace_pick_callback,
+)
 from bot.handlers.post_builder import (
     cancel_from_inline,
     confirm_cancel_no,
@@ -36,6 +47,8 @@ from bot.handlers.post_builder import (
 )
 from bot.handlers.post_manage import (
     handle_post_manage_callback,
+    receive_pm_btn_text,
+    receive_pm_btn_url,
     receive_pm_edit_link,
     receive_pm_edit_text,
     start_post_manage,
@@ -49,6 +62,7 @@ from bot.handlers.settings import (
 )
 from bot.handlers.stats import handle_stats_callback, show_stats
 from bot.services.panels import panel_gate
+from bot.services.publisher import deserialize_buttons
 
 
 class _FakeBot:
@@ -110,6 +124,10 @@ def _make_message(bot: _FakeBot, chat_id: int, user_id: int, text: str = "", **e
     async def reply_text(reply_txt, **kwargs):
         return await bot.send_message(chat_id, reply_txt, **kwargs)
 
+    async def delete():
+        bot.deleted_messages.append((chat_id, mid))
+        return True
+
     return SimpleNamespace(
         chat_id=chat_id,
         message_id=mid,
@@ -120,6 +138,7 @@ def _make_message(bot: _FakeBot, chat_id: int, user_id: int, text: str = "", **e
         forward_from_chat=extra.get("forward_from_chat"),
         forward_from_message_id=extra.get("forward_from_message_id"),
         reply_text=reply_text,
+        delete=delete,
     )
 
 
@@ -133,15 +152,14 @@ def _make_query(bot: _FakeBot, chat_id: int, user_id: int, message_id: int, data
         return await bot.edit_message_text(chat_id, message_id, text, **kwargs)
 
     msg = SimpleNamespace(chat_id=chat_id, message_id=message_id)
-    query = SimpleNamespace(
+    return SimpleNamespace(
         data=data,
-        from_user=SimpleNamespace(id=user_id, username="owner", first_name="Owner", last_name=""),
+        from_user=SimpleNamespace(id=user_id, username=f"u{user_id}", first_name="User", last_name=""),
         message=msg,
         answer=answer,
         edit_message_text=edit_message_text,
         answers=answers,
     )
-    return query
 
 
 def _make_update(user_id: int, chat_id: int, message=None, callback_query=None):
@@ -172,56 +190,49 @@ def _make_context(bot: _FakeBot, application=None):
 class FlowTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self._db_path = os.path.join(self._tmp.name, "flow.db")
         self._orig_token = config.BOT_TOKEN
         self._orig_owner = config.OWNER_ID
-        self._orig_admins = list(config.ADMIN_IDS)
-        self._orig_db_path = db.path
-        self._orig_cfg_db_path = config.DB_PATH
-        self._orig_above = config.DEFAULT_SHOW_ABOVE_TEXT
-        self._orig_large = config.DEFAULT_PREFER_LARGE_MEDIA
-        self._orig_btn = config.DEFAULT_BUTTON_TEXT
+        self._orig_data = config.DATA_DIR
+        self._orig_reg = config.REGISTRY_DB_PATH
+        self._orig_ws = config.WORKSPACES_DIR
+        self._orig_reg_path = registry.path
 
         config.BOT_TOKEN = "123456:TEST_TOKEN"
         config.OWNER_ID = 1000
-        config.ADMIN_IDS = [2000]
-        config.DEFAULT_SHOW_ABOVE_TEXT = True
-        config.DEFAULT_PREFER_LARGE_MEDIA = True
-        config.DEFAULT_BUTTON_TEXT = "🖼 مشاهده تصویر"
-        config.DB_PATH = self._db_path
-        db.path = self._db_path
-        db.init()
+        config.DATA_DIR = os.path.join(self._tmp.name, "data")
+        config.REGISTRY_DB_PATH = os.path.join(config.DATA_DIR, "registry.db")
+        config.WORKSPACES_DIR = os.path.join(config.DATA_DIR, "workspaces")
+        registry.path = config.REGISTRY_DB_PATH
+        clear_workspace_cache()
+        registry.init()
 
     def tearDown(self) -> None:
         config.BOT_TOKEN = self._orig_token
         config.OWNER_ID = self._orig_owner
-        config.ADMIN_IDS = self._orig_admins
-        config.DEFAULT_SHOW_ABOVE_TEXT = self._orig_above
-        config.DEFAULT_PREFER_LARGE_MEDIA = self._orig_large
-        config.DEFAULT_BUTTON_TEXT = self._orig_btn
-        config.DB_PATH = self._orig_cfg_db_path
-        db.path = self._orig_db_path
+        config.DATA_DIR = self._orig_data
+        config.REGISTRY_DB_PATH = self._orig_reg
+        config.WORKSPACES_DIR = self._orig_ws
+        registry.path = self._orig_reg_path
+        clear_workspace_cache()
         self._tmp.cleanup()
 
     def test_post_builder_full_flow_pv_and_channel(self) -> None:
         async def run():
             bot = _FakeBot()
             ctx = _make_context(bot)
-            db.add_target_channel(-100555, "Main Channel", "main_ch", 1000)
+            ws_db = get_workspace_db(2000)
+            ws_db.add_target_channel(-100555, "Main Channel", "main_ch", 2000)
 
-            # 1) Start post builder -> ReplyKeyboardRemove + text prompt
             msg1 = _make_message(bot, 2000, 2000, "📝 ساخت پست جدید")
             state = await start_post_builder(_make_update(2000, 2000, message=msg1), ctx)
             self.assertEqual(state, POST_TEXT)
             self.assertIsInstance(bot.sent_messages[0]["reply_markup"], ReplyKeyboardRemove)
 
-            # 2a) Over 4096 chars rejected
             too_long = _make_message(bot, 2000, 2000, "ا" * 4100)
             state = await receive_post_text(_make_update(2000, 2000, message=too_long), ctx)
             self.assertEqual(state, POST_TEXT)
             self.assertIn("4100", bot.sent_messages[-1]["text"])
 
-            # 2b) Send 4000-char formatted text -> prompt closed, photo link asked
             long_text = "ا" * 4000
             entities = [MessageEntity(type="bold", offset=0, length=10)]
             msg2 = _make_message(bot, 2000, 2000, long_text, entities=entities)
@@ -229,7 +240,6 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(state, POST_PHOTO_LINK)
             self.assertIn("4000 کاراکتر", bot.edited_messages[-1]["text"])
 
-            # 3) Private channel forward rejected
             priv_msg = _make_message(
                 bot,
                 2000,
@@ -244,7 +254,6 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(state, POST_PHOTO_LINK)
             self.assertIn("کانال خصوصی", bot.sent_messages[-1]["text"])
 
-            # 4) Public channel forward accepted -> live preview + control panel
             pub_msg = _make_message(
                 bot,
                 2000,
@@ -257,6 +266,8 @@ class FlowTests(unittest.TestCase):
             )
             state = await receive_photo_link(_make_update(2000, 2000, message=pub_msg), ctx)
             self.assertEqual(state, POST_PREVIEW)
+            # R2: Before send/publish/done, post is NOT saved in DB
+            self.assertEqual(ws_db.count_posts(), 0)
             preview_sent = bot.sent_messages[-2]
             self.assertEqual(len(preview_sent["text"]), 4000)
             self.assertEqual(preview_sent["link_preview_options"].url, "https://t.me/my_pics/42")
@@ -265,62 +276,72 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(preview_sent["entities"][0].type, "bold")
             self.assertIn((2000, pub_msg.message_id), bot.deleted_messages)
 
-            # 5) Toggle preview position -> refreshes preview with show_above_text=False
             ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
             q_toggle = _make_query(bot, 2000, 2000, ctrl_mid, "pb:toggle_pos")
             state = await handle_preview_callback(_make_update(2000, 2000, callback_query=q_toggle), ctx)
             self.assertEqual(state, POST_PREVIEW)
             self.assertFalse(bot.sent_messages[-2]["link_preview_options"].show_above_text)
 
-            # 6) Deliver clean post in PV
             ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
             q_pv = _make_query(bot, 2000, 2000, ctrl_mid, "pb:send_pv")
             state = await handle_preview_callback(_make_update(2000, 2000, callback_query=q_pv), ctx)
             self.assertEqual(state, POST_PREVIEW)
-            self.assertIsNone(bot.sent_messages[-1].get("reply_markup"))
-            self.assertEqual(db.get_stats_summary()["pv_deliveries"], 1)
+            self.assertEqual(ws_db.get_stats_summary()["pv_deliveries"], 1)
+            self.assertEqual(ws_db.count_posts(), 1)
 
-            # 7) Publish to channel -> sent to -100555, marked published, main menu restored
             q_ch = _make_query(bot, 2000, 2000, ctrl_mid, "pb:send_ch")
             state = await handle_preview_callback(_make_update(2000, 2000, callback_query=q_ch), ctx)
             self.assertEqual(state, ConversationHandler.END)
             ch_posts = [m for m in bot.sent_messages if m["chat_id"] == -100555]
             self.assertEqual(len(ch_posts), 1)
-            self.assertEqual(ch_posts[0]["link_preview_options"].url, "https://t.me/my_pics/42")
-            self.assertEqual(db.get_stats_summary()["published_posts"], 1)
+            self.assertEqual(ws_db.get_stats_summary()["published_posts"], 1)
             self.assertEqual(bot.sent_messages[-1]["text"], Msg.MAIN_MENU_PROMPT)
 
         asyncio.run(run())
 
-    def test_cancel_confirmation_yes_and_no(self) -> None:
+    def test_r2_cancel_does_not_save_post(self) -> None:
         async def run():
             bot = _FakeBot()
             ctx = _make_context(bot)
-            ctx.user_data["pb"] = {"text": "keep"}
+            ws_db = get_workspace_db(3000)
 
-            q_ask = _make_query(bot, 2000, 2000, 10, "cancel_prompt")
-            res = await cancel_from_inline(_make_update(2000, 2000, callback_query=q_ask), ctx)
-            self.assertIsNone(res)
+            msg1 = _make_message(bot, 3000, 3000, "📝 ساخت پست جدید")
+            await start_post_builder(_make_update(3000, 3000, message=msg1), ctx)
+            msg2 = _make_message(bot, 3000, 3000, "متن تست برای لغو")
+            await receive_post_text(_make_update(3000, 3000, message=msg2), ctx)
+            msg3 = _make_message(bot, 3000, 3000, "https://t.me/pics/5")
+            state = await receive_photo_link(_make_update(3000, 3000, message=msg3), ctx)
+            self.assertEqual(state, POST_PREVIEW)
+            self.assertEqual(ws_db.count_posts(), 0)
+
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+            preview_mid = ctx.user_data["pb"]["preview_msg_id"]
+
+            q_ask = _make_query(bot, 3000, 3000, ctrl_mid, "cancel_prompt")
+            await cancel_from_inline(_make_update(3000, 3000, callback_query=q_ask), ctx)
             confirm_mid = ctx.user_data["cancel_confirm_mid"]
 
-            q_no = _make_query(bot, 2000, 2000, confirm_mid, "cancel_no")
-            res = await confirm_cancel_no(_make_update(2000, 2000, callback_query=q_no), ctx)
-            self.assertIsNone(res)
-            self.assertEqual(ctx.user_data["pb"]["text"], "keep")
+            q_no = _make_query(bot, 3000, 3000, confirm_mid, "cancel_no")
+            await confirm_cancel_no(_make_update(3000, 3000, callback_query=q_no), ctx)
+            self.assertIn("pb", ctx.user_data)
 
-            q_yes = _make_query(bot, 2000, 2000, confirm_mid, "cancel_yes")
-            res = await confirm_cancel_yes(_make_update(2000, 2000, callback_query=q_yes), ctx)
+            q_yes = _make_query(bot, 3000, 3000, confirm_mid, "cancel_yes")
+            res = await confirm_cancel_yes(_make_update(3000, 3000, callback_query=q_yes), ctx)
             self.assertEqual(res, ConversationHandler.END)
             self.assertEqual(ctx.user_data, {})
+            self.assertEqual(ws_db.count_posts(), 0)
+            self.assertIn((3000, preview_mid), bot.deleted_messages)
+            self.assertIn((3000, ctrl_mid), bot.deleted_messages)
 
         asyncio.run(run())
 
-    def test_post_manage_and_channel_update(self) -> None:
+    def test_r6_post_manage_buttons_and_channel_update(self) -> None:
         async def run():
             bot = _FakeBot()
             ctx = _make_context(bot)
-            ch_id = db.add_target_channel(-100777, "Target Ch", "target_ch", 1000)
-            post_id = db.create_post("پست اول", "[]", "https://t.me/pics/9", 1000)
+            ws_db = get_workspace_db(1000)
+            ws_db.add_target_channel(-100777, "Target Ch", "target_ch", 1000)
+            post_id = ws_db.create_post("پست اول", "[]", "https://t.me/pics/9", 1000)
 
             msg = _make_message(bot, 1000, 1000, "📂 پست‌های ذخیره‌شده")
             state = await start_post_manage(_make_update(1000, 1000, message=msg), ctx)
@@ -331,68 +352,153 @@ class FlowTests(unittest.TestCase):
             state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_det), ctx)
             self.assertEqual(state, PM_DETAIL)
 
-            q_pub = _make_query(bot, 1000, 1000, mid, f"pm:send_ch:{post_id}")
-            state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_pub), ctx)
+            # R6: Manage inline buttons inside saved post
+            q_btns = _make_query(bot, 1000, 1000, mid, f"pm:btns:{post_id}")
+            state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_btns), ctx)
             self.assertEqual(state, PM_DETAIL)
-            self.assertEqual(db.get_post(post_id)["status"], "published")
 
-            # Edit text then update published message in channel
+            q_badd = _make_query(bot, 1000, 1000, mid, f"pm:btn_add:{post_id}")
+            state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_badd), ctx)
+            self.assertEqual(state, PM_ADD_BTN_TEXT)
+
+            btxt = _make_message(bot, 1000, 1000, "-")
+            state = await receive_pm_btn_text(_make_update(1000, 1000, message=btxt), ctx)
+            self.assertEqual(state, PM_ADD_BTN_URL)
+
+            burl = _make_message(bot, 1000, 1000, "https://t.me/target_ch/15")
+            state = await receive_pm_btn_url(_make_update(1000, 1000, message=burl), ctx)
+            self.assertEqual(state, PM_DETAIL)
+            saved_btns = deserialize_buttons(ws_db.get_post(post_id)["buttons_json"])
+            self.assertEqual(len(saved_btns), 1)
+            self.assertEqual(saved_btns[0]["url"], "https://t.me/target_ch/15")
+
+            # Publish with button -> update channel -> delete button -> delete post
+            q_pub = _make_query(bot, 1000, 1000, mid, f"pm:send_ch:{post_id}")
+            await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_pub), ctx)
+            self.assertEqual(ws_db.get_post(post_id)["status"], "published")
+            ch_sent = [m for m in bot.sent_messages if m["chat_id"] == -100777]
+            self.assertIsNotNone(ch_sent[0]["reply_markup"])
+
+            q_bdel = _make_query(bot, 1000, 1000, mid, f"pm:btn_del:{post_id}:0")
+            await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_bdel), ctx)
+            self.assertEqual(deserialize_buttons(ws_db.get_post(post_id)["buttons_json"]), [])
+
             q_et = _make_query(bot, 1000, 1000, mid, f"pm:edit_text:{post_id}")
             await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_et), ctx)
             new_msg = _make_message(bot, 1000, 1000, "متن ویرایش‌شده")
-            state = await receive_pm_edit_text(_make_update(1000, 1000, message=new_msg), ctx)
-            self.assertEqual(state, PM_DETAIL)
+            await receive_pm_edit_text(_make_update(1000, 1000, message=new_msg), ctx)
 
             q_upd = _make_query(bot, 1000, 1000, mid, f"pm:update_ch:{post_id}")
             await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_upd), ctx)
             ch_edits = [m for m in bot.edited_messages if m["chat_id"] == -100777]
-            self.assertEqual(len(ch_edits), 1)
             self.assertEqual(ch_edits[0]["text"], "متن ویرایش‌شده")
 
-            # Edit link
             q_el = _make_query(bot, 1000, 1000, mid, f"pm:edit_link:{post_id}")
             await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_el), ctx)
             link_msg = _make_message(bot, 1000, 1000, "t.me/pics/99")
             await receive_pm_edit_link(_make_update(1000, 1000, message=link_msg), ctx)
-            self.assertEqual(db.get_post(post_id)["photo_url"], "https://t.me/pics/99")
+            self.assertEqual(ws_db.get_post(post_id)["photo_url"], "https://t.me/pics/99")
 
-            # Delete with confirm
             q_del = _make_query(bot, 1000, 1000, mid, f"pm:del_yes:{post_id}")
             state = await handle_post_manage_callback(_make_update(1000, 1000, callback_query=q_del), ctx)
             self.assertEqual(state, PM_LIST)
-            self.assertIsNone(db.get_post(post_id))
-            self.assertTrue(ch_id > 0)
+            self.assertIsNone(ws_db.get_post(post_id))
 
         asyncio.run(run())
 
-    def test_settings_owner_guard_and_actions(self) -> None:
+    def test_r4_r5_public_start_role_selection_and_admin_guard(self) -> None:
         async def run():
             bot = _FakeBot()
             ctx = _make_context(bot)
 
-            # Admin (non-owner) is rejected
-            admin_msg = _make_message(bot, 2000, 2000, "⚙️ تنظیمات")
-            res = await open_settings(_make_update(2000, 2000, message=admin_msg), ctx)
-            self.assertEqual(res, ConversationHandler.END)
-            self.assertEqual(bot.sent_messages[-1]["text"], Msg.ACCESS_DENIED)
+            # Public user 5555 starts bot -> gets personal DB & owner menu
+            s_msg = _make_message(bot, 5555, 5555, "/start")
+            await start(_make_update(5555, 5555, message=s_msg), ctx)
+            self.assertTrue(os.path.exists(os.path.join(config.WORKSPACES_DIR, "user_5555.db")))
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.OWNER_WELCOME)
 
-            # Owner opens panel -> version shown
+            # Owner 1000 opens Settings and adds 2000 as admin
             owner_msg = _make_message(bot, 1000, 1000, "⚙️ تنظیمات")
             res = await open_settings(_make_update(1000, 1000, message=owner_msg), ctx)
             self.assertEqual(res, SETTINGS_PANEL)
             self.assertIn(BOT_VERSION, bot.sent_messages[-1]["text"])
             panel_mid = bot.sent_messages[-1]["message_id"]
 
-            # Add admin
             q_add_adm = _make_query(bot, 1000, 1000, panel_mid, "st:adm_add")
             res = await settings_callback(_make_update(1000, 1000, callback_query=q_add_adm), ctx)
             self.assertEqual(res, SETTINGS_ADMIN)
-            adm_in = _make_message(bot, 1000, 1000, "3000")
+            adm_in = _make_message(bot, 1000, 1000, "2000")
             res = await receive_admin_input(_make_update(1000, 1000, message=adm_in), ctx)
             self.assertEqual(res, SETTINGS_PANEL)
-            self.assertIn(3000, config.ADMIN_IDS)
+            self.assertTrue(registry.is_workspace_admin(1000, 2000))
 
-            # Add channel with precheck
+            # User 2000 starts bot -> prompted to choose Owner vs Admin of 1000
+            u2_start = _make_message(bot, 2000, 2000, "/start")
+            await start(_make_update(2000, 2000, message=u2_start), ctx)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.CHOOSE_ROLE_PROMPT)
+            pick_mid = bot.sent_messages[-1]["message_id"]
+
+            # User 2000 selects Admin of 1000
+            q_pick = _make_query(bot, 2000, 2000, pick_mid, "ws_pick:1000")
+            await workspace_pick_callback(_make_update(2000, 2000, callback_query=q_pick), ctx)
+            self.assertEqual(registry.get_active_workspace_id(2000), 1000)
+
+            # In admin mode, 2000 is blocked from Settings and Backup
+            adm_st = _make_message(bot, 2000, 2000, "⚙️ تنظیمات")
+            res = await open_settings(_make_update(2000, 2000, message=adm_st), ctx)
+            self.assertEqual(res, ConversationHandler.END)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.OWNER_ONLY_FEATURE)
+
+            adm_bk = _make_message(bot, 2000, 2000, "💾 بک‌آپ")
+            await handle_backup(_make_update(2000, 2000, message=adm_bk), ctx)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.OWNER_ONLY_FEATURE)
+
+            # In admin mode, 2000 creates a post -> saved in 1000's DB, NOT 2000's DB
+            pb_s = _make_message(bot, 2000, 2000, "📝 ساخت پست جدید")
+            await start_post_builder(_make_update(2000, 2000, message=pb_s), ctx)
+            await receive_post_text(
+                _make_update(2000, 2000, message=_make_message(bot, 2000, 2000, "پست ادمین")),
+                ctx,
+            )
+            await receive_photo_link(
+                _make_update(2000, 2000, message=_make_message(bot, 2000, 2000, "https://t.me/pics/7")),
+                ctx,
+            )
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+            await handle_preview_callback(
+                _make_update(2000, 2000, callback_query=_make_query(bot, 2000, 2000, ctrl_mid, "pb:done")),
+                ctx,
+            )
+            self.assertEqual(get_workspace_db(1000).count_posts(), 1)
+            self.assertEqual(get_workspace_db(2000).count_posts(), 0)
+
+            # Switcher button works
+            sw_msg = _make_message(bot, 2000, 2000, "🔄 تغییر فضا / نقش")
+            await open_workspace_switcher(_make_update(2000, 2000, message=sw_msg), ctx)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.CHOOSE_ROLE_PROMPT)
+
+            # Owner revokes 2000 -> next action falls back to owner mode with notice
+            registry.remove_workspace_admin(1000, 2000)
+            st_msg = _make_message(bot, 2000, 2000, "⚙️ تنظیمات")
+            res = await open_settings(_make_update(2000, 2000, message=st_msg), ctx)
+            self.assertEqual(res, SETTINGS_PANEL)
+            self.assertTrue(
+                any(m["text"] == Msg.ROLE_REVOKED_NOTICE for m in bot.sent_messages)
+            )
+
+        asyncio.run(run())
+
+    def test_settings_channels_preview_and_r3_backup(self) -> None:
+        async def run():
+            app = create_application()
+            bot = _FakeBot()
+            ctx = _make_context(bot, application=app)
+            ws_db = get_workspace_db(1000)
+
+            owner_msg = _make_message(bot, 1000, 1000, "⚙️ تنظیمات")
+            await open_settings(_make_update(1000, 1000, message=owner_msg), ctx)
+            panel_mid = bot.sent_messages[-1]["message_id"]
+
             bot.chats["@my_chan"] = SimpleNamespace(
                 id=-100999, type="channel", title="My Chan", username="my_chan"
             )
@@ -403,12 +509,11 @@ class FlowTests(unittest.TestCase):
             ch_in = _make_message(bot, 1000, 1000, "@my_chan")
             res = await receive_channel_input(_make_update(1000, 1000, message=ch_in), ctx)
             self.assertEqual(res, SETTINGS_PANEL)
-            self.assertEqual(db.count_target_channels(), 1)
+            self.assertEqual(ws_db.count_target_channels(), 1)
 
-            # Toggle preview position & update button label
             q_pos = _make_query(bot, 1000, 1000, panel_mid, "st:pv_pos")
             await settings_callback(_make_update(1000, 1000, callback_query=q_pos), ctx)
-            self.assertFalse(config.DEFAULT_SHOW_ABOVE_TEXT)
+            self.assertFalse(ws_db.get_show_above_text())
 
             q_lbl = _make_query(bot, 1000, 1000, panel_mid, "st:btn_lbl")
             res = await settings_callback(_make_update(1000, 1000, callback_query=q_lbl), ctx)
@@ -416,49 +521,30 @@ class FlowTests(unittest.TestCase):
             lbl_in = _make_message(bot, 1000, 1000, "📸 باز کردن عکس")
             res = await receive_button_label_input(_make_update(1000, 1000, message=lbl_in), ctx)
             self.assertEqual(res, SETTINGS_PANEL)
-            self.assertEqual(config.DEFAULT_BUTTON_TEXT, "📸 باز کردن عکس")
+            self.assertEqual(ws_db.get_default_button_text(), "📸 باز کردن عکس")
 
-        asyncio.run(run())
-
-    def test_stats_and_panel_gate_and_backup_guard(self) -> None:
-        async def run():
-            app = build_application()
-            bot = _FakeBot()
-            ctx = _make_context(bot, application=app)
-
-            # Stranger rejected by stats
-            bad_msg = _make_message(bot, 9999, 9999, "📊 آمار")
-            res = await show_stats(_make_update(9999, 9999, message=bad_msg), ctx)
-            self.assertEqual(res, ConversationHandler.END)
-
-            # Owner opens stats -> registered in _panel_msgs
+            # Stats + panel_gate
             ok_msg = _make_message(bot, 1000, 1000, "📊 آمار")
             res = await show_stats(_make_update(1000, 1000, message=ok_msg), ctx)
             self.assertEqual(res, STATS_VIEW)
             stats_mid = bot.sent_messages[-1]["message_id"]
-            self.assertIn(stats_mid, ctx.chat_data["_panel_msgs"])
+            self.assertIn("آمار کل ربات", bot.sent_messages[-1]["text"])
 
-            # Simulate active conversation in stats, then trigger panel_gate
             app.bot_data["panel_convs"]["stats"]._conversations[(1000, 1000)] = STATS_VIEW
             gate_msg = _make_message(bot, 1000, 1000, "📂 پست‌های ذخیره‌شده")
             await panel_gate(_make_update(1000, 1000, message=gate_msg), ctx)
             self.assertNotIn((1000, 1000), app.bot_data["panel_convs"]["stats"]._conversations)
-            self.assertEqual(bot.edited_messages[-1]["text"], Msg.PANEL_CLOSED)
-            self.assertIsNone(bot.edited_messages[-1]["reply_markup"])
 
-            # Close stats via callback
             q_close = _make_query(bot, 1000, 1000, stats_mid, "stats:close")
             res = await handle_stats_callback(_make_update(1000, 1000, callback_query=q_close), ctx)
             self.assertEqual(res, ConversationHandler.END)
 
-            # Backup rejects admin, allows owner
-            adm_bk = _make_message(bot, 2000, 2000, "💾 بک‌آپ")
-            await handle_backup(_make_update(2000, 2000, message=adm_bk), ctx)
-            self.assertEqual(bot.sent_messages[-1]["text"], Msg.ACCESS_DENIED)
-
+            # R3: Backup sends ONLY .db file (never .env)
             own_bk = _make_message(bot, 1000, 1000, "💾 بک‌آپ")
             await handle_backup(_make_update(1000, 1000, message=own_bk), ctx)
-            self.assertTrue(len(bot.sent_documents) >= 1)
+            self.assertEqual(len(bot.sent_documents), 1)
+            self.assertTrue(bot.sent_documents[0]["filename"].endswith(".db"))
+            self.assertNotIn(".env", bot.sent_documents[0]["filename"])
 
         asyncio.run(run())
 

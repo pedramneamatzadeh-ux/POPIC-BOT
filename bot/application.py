@@ -1,7 +1,8 @@
+import html
 import logging
 import re
 
-from telegram.error import BadRequest, TelegramError
+from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -9,11 +10,14 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from .config import config
 from .constants import (
+    PM_ADD_BTN_TEXT,
+    PM_ADD_BTN_URL,
     PM_DETAIL,
     PM_EDIT_LINK,
     PM_EDIT_TEXT,
@@ -33,9 +37,14 @@ from .constants import (
     SETTINGS_CHANNEL,
     SETTINGS_PANEL,
     STATS_VIEW,
+    SWITCH_WORKSPACE_BUTTON,
 )
 from .handlers.backup import handle_backup
-from .handlers.base import start
+from .handlers.base import (
+    open_workspace_switcher,
+    start,
+    workspace_pick_callback,
+)
 from .handlers.post_builder import (
     cancel_builder,
     cancel_from_inline,
@@ -52,6 +61,8 @@ from .handlers.post_builder import (
 )
 from .handlers.post_manage import (
     handle_post_manage_callback,
+    receive_pm_btn_text,
+    receive_pm_btn_url,
     receive_pm_edit_link,
     receive_pm_edit_text,
     start_post_manage,
@@ -75,282 +86,246 @@ from .services.panels import (
 logger = logging.getLogger(__name__)
 
 
-def _build_post_builder_conversation() -> ConversationHandler:
-    return ConversationHandler(
+async def _error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    logger.exception(
+        "خطای پیش‌بینی‌نشده هنگام پردازش آپدیت %s: %s",
+        getattr(update, "update_id", None),
+        context.error,
+        exc_info=context.error,
+    )
+    if config.OWNER_ID is not None:
+        try:
+            err_text = html.escape(str(context.error)[:500])
+            await context.bot.send_message(
+                chat_id=config.OWNER_ID,
+                text=(
+                    "⚠️ <b>خطای غیرمنتظره در POPIC-BOT:</b>\n"
+                    f"<code>{err_text}</code>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.debug("ارسال گزارش خطا به ابرمالک ناموفق بود.", exc_info=True)
+
+
+def create_application() -> Application:
+    application = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .build()
+    )
+
+    panel_gate_handler = MessageHandler(
+        filters.Regex(PANEL_BUTTONS_PATTERN) & filters.ChatType.PRIVATE,
+        panel_gate,
+    )
+    application.add_handler(panel_gate_handler, group=-1)
+
+    cancel_inline_handlers = [
+        CallbackQueryHandler(cancel_from_inline, pattern=r"^cancel_prompt$"),
+        CallbackQueryHandler(confirm_cancel_yes, pattern=r"^cancel_yes$"),
+        CallbackQueryHandler(confirm_cancel_no, pattern=r"^cancel_no$"),
+    ]
+    text_input_filter = (
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex(PANEL_BUTTONS_PATTERN)
+    )
+    forward_or_text = (
+        (filters.TEXT | filters.FORWARDED)
+        & ~filters.COMMAND
+        & ~filters.Regex(PANEL_BUTTONS_PATTERN)
+    )
+
+    post_builder_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.Regex("^📝 ساخت پست جدید$"),
+                filters.Regex(r"^📝 ساخت پست جدید$") & filters.ChatType.PRIVATE,
                 start_post_builder,
             ),
         ],
         states={
             POST_TEXT: [
-                MessageHandler(
-                    filters.ALL & ~filters.COMMAND,
-                    receive_post_text,
-                ),
+                MessageHandler(text_input_filter, receive_post_text),
+                *cancel_inline_handlers,
             ],
             POST_PHOTO_LINK: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_photo_link,
-                ),
+                MessageHandler(forward_or_text, receive_photo_link),
+                *cancel_inline_handlers,
             ],
             POST_PREVIEW: [
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
             POST_SELECT_CHANNEL: [
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
             POST_EDIT_TEXT: [
-                MessageHandler(
-                    filters.ALL & ~filters.COMMAND,
-                    receive_edit_text,
-                ),
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                MessageHandler(text_input_filter, receive_edit_text),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
             POST_EDIT_LINK: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_edit_link,
-                ),
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                MessageHandler(forward_or_text, receive_edit_link),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
             POST_ADD_BTN_TEXT: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    receive_btn_text,
-                ),
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                MessageHandler(text_input_filter, receive_btn_text),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
             POST_ADD_BTN_URL: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_btn_url,
-                ),
-                CallbackQueryHandler(
-                    handle_preview_callback,
-                    pattern=r"^pb:",
-                ),
+                MessageHandler(forward_or_text, receive_btn_url),
+                CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
             ],
         },
         fallbacks=[
-            MessageHandler(filters.Regex("^لغو$"), cancel_builder),
-            MessageHandler(filters.COMMAND, cancel_builder),
-            CallbackQueryHandler(
-                cancel_from_inline,
-                pattern=r"^cancel_prompt$",
+            CommandHandler("cancel", cancel_builder),
+            MessageHandler(
+                filters.Regex(r"^(لغو|بازگشت به منوی اصلی)$"),
+                cancel_builder,
             ),
-            CallbackQueryHandler(
-                confirm_cancel_yes,
-                pattern=r"^cancel_yes$",
-            ),
-            CallbackQueryHandler(
-                confirm_cancel_no,
-                pattern=r"^cancel_no$",
-            ),
+            *cancel_inline_handlers,
         ],
+        per_message=False,
         allow_reentry=True,
     )
 
-
-def _build_post_manage_conversation() -> ConversationHandler:
-    return ConversationHandler(
+    post_manage_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.Regex("^📂 پست‌های ذخیره‌شده$"),
+                filters.Regex(r"^📂 پست‌های ذخیره‌شده$") & filters.ChatType.PRIVATE,
                 start_post_manage,
             ),
         ],
         states={
             PM_LIST: [
-                CallbackQueryHandler(
-                    handle_post_manage_callback,
-                    pattern=r"^pm:",
-                ),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
             PM_DETAIL: [
-                CallbackQueryHandler(
-                    handle_post_manage_callback,
-                    pattern=r"^pm:",
-                ),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
             PM_SELECT_CHANNEL: [
-                CallbackQueryHandler(
-                    handle_post_manage_callback,
-                    pattern=r"^pm:",
-                ),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
             PM_EDIT_TEXT: [
-                MessageHandler(
-                    filters.ALL & ~filters.COMMAND,
-                    receive_pm_edit_text,
-                ),
-                CallbackQueryHandler(
-                    handle_post_manage_callback,
-                    pattern=r"^pm:",
-                ),
+                MessageHandler(text_input_filter, receive_pm_edit_text),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
             PM_EDIT_LINK: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_pm_edit_link,
-                ),
-                CallbackQueryHandler(
-                    handle_post_manage_callback,
-                    pattern=r"^pm:",
-                ),
+                MessageHandler(forward_or_text, receive_pm_edit_link),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
+            ],
+            PM_ADD_BTN_TEXT: [
+                MessageHandler(text_input_filter, receive_pm_btn_text),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
+            ],
+            PM_ADD_BTN_URL: [
+                MessageHandler(forward_or_text, receive_pm_btn_url),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
         },
-        fallbacks=[
-            MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END),
-        ],
+        fallbacks=[],
+        per_message=False,
         allow_reentry=True,
     )
 
-
-def _build_stats_conversation() -> ConversationHandler:
-    return ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^📊 آمار$"), show_stats),
-        ],
-        states={
-            STATS_VIEW: [
-                CallbackQueryHandler(
-                    handle_stats_callback,
-                    pattern=r"^stats:",
-                ),
-            ],
-        },
-        fallbacks=[
-            MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END),
-        ],
-        allow_reentry=True,
-    )
-
-
-def _build_settings_conversation() -> ConversationHandler:
-    def _st_callback() -> CallbackQueryHandler:
-        return CallbackQueryHandler(settings_callback, pattern=r"^st:")
-
-    return ConversationHandler(
+    settings_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
-                filters.Regex(f"^{re.escape(SETTINGS_BUTTON)}$"),
+                filters.Regex(f"^{re.escape(SETTINGS_BUTTON)}$")
+                & filters.ChatType.PRIVATE,
                 open_settings,
             ),
         ],
         states={
-            SETTINGS_PANEL: [_st_callback()],
+            SETTINGS_PANEL: [
+                CallbackQueryHandler(settings_callback, pattern=r"^st:"),
+            ],
             SETTINGS_ADMIN: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_admin_input,
-                ),
-                _st_callback(),
+                MessageHandler(forward_or_text, receive_admin_input),
+                CallbackQueryHandler(settings_callback, pattern=r"^st:"),
             ],
             SETTINGS_CHANNEL: [
-                MessageHandler(
-                    (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
-                    receive_channel_input,
-                ),
-                _st_callback(),
+                MessageHandler(forward_or_text, receive_channel_input),
+                CallbackQueryHandler(settings_callback, pattern=r"^st:"),
             ],
             SETTINGS_BTN_LABEL: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    receive_button_label_input,
-                ),
-                _st_callback(),
+                MessageHandler(text_input_filter, receive_button_label_input),
+                CallbackQueryHandler(settings_callback, pattern=r"^st:"),
             ],
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_settings),
             MessageHandler(
-                filters.Regex("^(لغو|بازگشت به منوی اصلی)$"),
+                filters.Regex(r"^(لغو|بازگشت به منوی اصلی)$"),
                 cancel_settings,
             ),
-            MessageHandler(filters.COMMAND, cancel_settings),
         ],
+        per_message=False,
         allow_reentry=True,
     )
 
-
-async def _global_error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    error = context.error
-    if isinstance(error, BadRequest) and (
-        "query is too old" in str(error).lower()
-    ):
-        logger.info("callback query منقضی بود: %s", error)
-        return
-
-    logger.error("خطای غیرمنتظره", exc_info=error)
-    if config.OWNER_ID:
-        try:
-            await context.bot.send_message(
-                config.OWNER_ID,
-                (
-                    "⚠️ خطای غیرمنتظره در ربات:\n"
-                    f"{type(error).__name__}: {error}"
-                )[:4000],
-            )
-        except TelegramError:
-            logger.warning("ارسال اطلاع خطا به مالک ممکن نشد")
-
-
-def build_application() -> Application:
-    application = Application.builder().token(config.BOT_TOKEN).build()
-
-    application.add_handler(
-        MessageHandler(filters.Regex(PANEL_BUTTONS_PATTERN), panel_gate),
-        group=-1,
+    stats_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(r"^📊 آمار$") & filters.ChatType.PRIVATE,
+                show_stats,
+            ),
+        ],
+        states={
+            STATS_VIEW: [
+                CallbackQueryHandler(handle_stats_callback, pattern=r"^stats:"),
+            ],
+        },
+        fallbacks=[],
+        per_message=False,
+        allow_reentry=True,
     )
-
-    application.add_handler(CommandHandler("start", start))
-
-    post_builder_conv = _build_post_builder_conversation()
-    post_manage_conv = _build_post_manage_conversation()
-    stats_conv = _build_stats_conversation()
-    settings_conv = _build_settings_conversation()
-
-    application.add_handler(post_builder_conv)
-    application.add_handler(post_manage_conv)
-    application.add_handler(stats_conv)
-    application.add_handler(settings_conv)
-
-    application.add_handler(
-        MessageHandler(filters.Regex("^💾 بک‌آپ$"), handle_backup)
-    )
-
-    application.add_handler(CallbackQueryHandler(stale_callback_answer))
 
     register_panels(
         application,
         {
             "post_builder": post_builder_conv,
             "post_manage": post_manage_conv,
-            "stats": stats_conv,
             "settings": settings_conv,
+            "stats": stats_conv,
         },
     )
 
-    application.add_error_handler(_global_error_handler)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(
+        CallbackQueryHandler(workspace_pick_callback, pattern=r"^ws_pick:\d+$")
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(f"^{re.escape(SWITCH_WORKSPACE_BUTTON)}$")
+            & filters.ChatType.PRIVATE,
+            open_workspace_switcher,
+        )
+    )
+    application.add_handler(post_builder_conv)
+    application.add_handler(post_manage_conv)
+    application.add_handler(settings_conv)
+    application.add_handler(stats_conv)
+
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^💾 بک‌آپ$") & filters.ChatType.PRIVATE,
+            handle_backup,
+        )
+    )
+    application.add_handler(
+        TypeHandler(Update, stale_callback_answer),
+        group=1,
+    )
+    application.add_error_handler(_error_handler)
 
     return application
