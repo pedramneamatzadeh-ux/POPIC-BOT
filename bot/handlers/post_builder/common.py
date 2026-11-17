@@ -6,7 +6,7 @@ from typing import Any, Dict
 from telegram.error import TelegramError
 
 from ...keyboards import post_preview_controls_keyboard
-from ...services.publisher import send_post_to_chat
+from ...services.publisher import build_buttons_markup, send_post_to_chat
 from ...utils import PANEL_MSG_KEY, register_panel_message
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,37 @@ def build_control_summary(pb: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+async def sync_preview_buttons(
+    context: Any,
+    chat_id: int,
+    pb: Dict[str, Any],
+) -> None:
+    """دکمه‌های شیشه‌ای پیام پیش‌نمایش را بدون ارسال مجدد پیام به‌روزرسانی می‌کند."""
+    preview_mid = pb.get("preview_msg_id")
+    if not preview_mid:
+        return
+    edit_markup = getattr(
+        getattr(context, "bot", None),
+        "edit_message_reply_markup",
+        None,
+    )
+    if edit_markup is None:
+        return
+    markup = build_buttons_markup(
+        pb.get("buttons") or [],
+        workspace_id=pb.get("ws_id"),
+        post_id=pb.get("post_id"),
+    )
+    try:
+        await edit_markup(
+            chat_id=chat_id,
+            message_id=preview_mid,
+            reply_markup=markup,
+        )
+    except TelegramError:
+        pass
+
+
 async def send_or_refresh_preview(
     context: Any,
     chat_id: int,
@@ -118,6 +149,8 @@ async def send_or_refresh_preview(
         show_above_text=pb["show_above_text"],
         prefer_large_media=pb["prefer_large_media"],
         buttons=pb.get("buttons") or [],
+        workspace_id=pb.get("ws_id"),
+        post_id=pb.get("post_id"),
     )
     pb["preview_msg_id"] = preview_msg.message_id
 

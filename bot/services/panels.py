@@ -105,6 +105,8 @@ async def stale_callback_answer(
     query = update.callback_query
     if not query:
         return
+    if (query.data or "").startswith(("pb_disp:", "ws_pick:")):
+        return
     try:
         await query.answer("🚫 این پنل بسته شده است.")
     except Exception:

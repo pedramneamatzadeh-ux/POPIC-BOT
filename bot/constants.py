@@ -7,7 +7,7 @@
 #   • تغییر شکستنی (env/schema/state)  ⇒ major  (X.0.0)
 # ============================================================================
 
-BOT_VERSION = "0.2.0"
+BOT_VERSION = "0.3.0"
 BOT_VERSION_DATE = "2026-11-17"
 
 
@@ -25,7 +25,9 @@ BOT_VERSION_DATE = "2026-11-17"
     POST_ADD_BTN_TEXT,
     POST_ADD_BTN_URL,
     POST_SELECT_CHANNEL,
-) = range(8)
+    POST_BTN_EDIT_TEXT,
+    POST_BTN_EDIT_VALUE,
+) = range(10)
 
 # مدیریت پست‌های ذخیره‌شده
 (
@@ -36,10 +38,12 @@ BOT_VERSION_DATE = "2026-11-17"
     PM_SELECT_CHANNEL,
     PM_ADD_BTN_TEXT,
     PM_ADD_BTN_URL,
-) = range(8, 15)
+    PM_BTN_EDIT_TEXT,
+    PM_BTN_EDIT_VALUE,
+) = range(10, 19)
 
 # آمار
-STATS_VIEW = 15
+STATS_VIEW = 19
 
 # پنل تنظیمات (فقط مالک فضای کاری)
 (
@@ -47,7 +51,7 @@ STATS_VIEW = 15
     SETTINGS_ADMIN,
     SETTINGS_CHANNEL,
     SETTINGS_BTN_LABEL,
-) = range(16, 20)
+) = range(20, 24)
 
 
 SETTINGS_BUTTON = "⚙️ تنظیمات"
@@ -55,7 +59,11 @@ SWITCH_WORKSPACE_BUTTON = "🔄 تغییر فضا / نقش"
 
 MAX_POST_TEXT_LENGTH = 4096
 MAX_BUTTON_TEXT_LENGTH = 64
-MAX_EXTRA_BUTTONS = 6
+MAX_EXTRA_BUTTONS = 12
+MAX_BUTTONS_PER_ROW = 4
+MAX_POPUP_TEXT_LENGTH = 200
+MAX_COPY_TEXT_LENGTH = 256
+DEFAULT_POPUP_TEXT = "این دکمه نمایشی است"
 
 
 class Msg:
@@ -127,15 +135,32 @@ class Msg:
     POST_CANCELLED = "❌ ساخت پست لغو شد و چیزی ذخیره نشد."
     POST_CANCELLED_INLINE = "❌ ساخت پست لغو شد و چیزی ذخیره نشد."
     POST_DONE = "✅ پست در «📂 پست‌های ذخیره‌شده» ثبت شد."
+    POST_PV_DELIVERED = "✅ پست آماده در پی‌وی تحویل شد و ذخیره گردید.\nمنوی اصلی:"
 
+    POST_ASK_BTN_TYPE = (
+        "🔘 نوع دکمهٔ شیشه‌ای جدید را انتخاب کن:\n\n"
+        "• 🔗 لینکدار: باز کردن لینک دلخواه\n"
+        "• 💬 نمایشی (پاپ‌آپ): نمایش یک پیام هشدار هنگام کلیک (بدون لینک)\n"
+        "• 📋 کپی متن: کپی کردن خودکار یک متن/کد هنگام کلیک"
+    )
     POST_ASK_BTN_TEXT = (
-        "🏷 متن دکمهٔ شیشه‌ای جدید را وارد کن\n"
+        "🏷 متن روی دکمهٔ شیشه‌ای را وارد کن\n"
         "(یا برای استفاده از متن پیش‌فرض «{default}» یک «-» بفرست):"
     )
     POST_ASK_BTN_URL = (
         "🔗 لینک دکمه «{label}» را ارسال کن:\n"
         "مثال: https://t.me/channel/123"
     )
+    POST_ASK_BTN_POPUP = (
+        "💬 متن پیامی که هنگام کلیک روی دکمهٔ نمایشی «{label}» نمایش داده می‌شود را وارد کن\n"
+        "(حداکثر ۲۰۰ کاراکتر — یا برای متن پیش‌فرض «{default_popup}» یک «-» بفرست):"
+    )
+    POST_ASK_BTN_COPY = (
+        "📋 متنی که با کلیک روی دکمه «{label}» در کلیپ‌بورد کپی شود را وارد کن\n"
+        "(حداکثر ۲۵۶ کاراکتر):"
+    )
+    BTN_POPUP_INVALID = "❌ متن پاپ‌آپ باید بین ۱ تا ۲۰۰ کاراکتر باشد."
+    BTN_COPY_INVALID = "❌ متن کپی باید بین ۱ تا ۲۵۶ کاراکتر باشد."
 
     NO_CHANNELS_CONFIGURED = (
         "⚠️ هنوز هیچ کانال مقصدی در این فضا ثبت نشده است!\n"
