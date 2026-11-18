@@ -7,6 +7,7 @@ from telegram import (
     ReplyKeyboardMarkup,
 )
 
+from .config import config
 from .constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON
 from .database import registry, resolve_user_workspace
 from .services.publisher import (
@@ -77,19 +78,27 @@ def _menu_row(row: list) -> list:
 def build_main_menu(
     is_owner: bool = True,
     has_admin_roles: bool = False,
+    is_env_owner: bool = False,
 ) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = [
         ["📝 ساخت پست جدید", "📂 پست‌های ذخیره‌شده"],
     ]
 
     if is_owner:
-        rows.append(["📊 آمار", "💾 بک‌آپ"])
-        last_row = [SETTINGS_BUTTON]
-        if has_admin_roles:
-            last_row.append(SWITCH_WORKSPACE_BUTTON)
-        rows.append(last_row)
+        if is_env_owner:
+            rows.append(["📊 آمار", "💾 بک‌آپ"])
+            last_row = [SETTINGS_BUTTON]
+            if has_admin_roles:
+                last_row.append(SWITCH_WORKSPACE_BUTTON)
+            rows.append(last_row)
+        else:
+            rows.append(["📊 آمار", SETTINGS_BUTTON])
+            if has_admin_roles:
+                rows.append([SWITCH_WORKSPACE_BUTTON])
     else:
         row2 = ["📊 آمار"]
+        if is_env_owner:
+            row2.append("💾 بک‌آپ")
         if has_admin_roles:
             row2.append(SWITCH_WORKSPACE_BUTTON)
         rows.append(row2)
@@ -101,16 +110,22 @@ def build_main_menu(
 
 
 def main_menu_for(user_id: Optional[int]) -> ReplyKeyboardMarkup:
-    """منوی اصلی بر اساس نقش فعال کاربر (مالک فضای شخصی یا ادمینِ فضای دیگر)."""
+    """منوی اصلی بر اساس نقش فعال کاربر (و نمایش بک‌آپ فقط برای OWNER_ID در .env)."""
     if user_id is None:
-        return build_main_menu(is_owner=True, has_admin_roles=False)
+        return build_main_menu(
+            is_owner=True,
+            has_admin_roles=False,
+            is_env_owner=False,
+        )
 
     _, status, _ = resolve_user_workspace(user_id)
     is_owner = status != "admin"
     has_admin_roles = bool(registry.get_admin_workspaces(user_id))
+    is_env_owner = config.OWNER_ID is not None and int(user_id) == int(config.OWNER_ID)
     return build_main_menu(
         is_owner=is_owner,
         has_admin_roles=has_admin_roles,
+        is_env_owner=is_env_owner,
     )
 
 
@@ -196,10 +211,39 @@ def build_pagination_row(
 # کیبوردهای کنترل پیش‌نمایش و ویرایشگر پیشرفته دکمه‌های شیشه‌ای
 # ---------------------------------------------------------------------------
 
+def post_media_choice_keyboard(
+    prefix: str = "pb",
+    back_callback: Optional[str] = None,
+    include_cancel: bool = True,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [ib("🚫 بدون عکس", callback_data=f"{prefix}:media:none", style="primary")],
+        [ib("📷 عکس عادی (روی پیام)", callback_data=f"{prefix}:media:photo", style="primary")],
+        [ib("🔗 عکس به صورت لینک", callback_data=f"{prefix}:media:link", style="success")],
+    ]
+    if back_callback:
+        rows.append([ib("◀️ بازگشت", callback_data=back_callback, style="danger")])
+    elif include_cancel:
+        rows.append([ib("❌ لغو ساخت پست", callback_data="cancel_prompt", style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def post_caption_too_long_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [ib("🔗 تغییر به عکس با لینک (تا ۴۰۹۶ کاراکتر)", callback_data="pb:media:link", style="success")],
+            [ib("✏️ ویرایش و کوتاه‌کردن متن", callback_data="pb:edit_text_pre", style="primary")],
+            [ib("🚫 ادامه بدون عکس", callback_data="pb:media:none", style="primary")],
+            [ib("❌ لغو ساخت پست", callback_data="cancel_prompt", style="danger")],
+        ]
+    )
+
+
 def post_preview_controls_keyboard(
     show_above_text: bool,
     prefer_large_media: bool,
     extra_buttons_count: int = 0,
+    media_type: str = "link",
 ) -> InlineKeyboardMarkup:
     pos_label = (
         "⬆️ پیش‌نمایش: بالای متن" if show_above_text else "⬇️ پیش‌نمایش: پایین متن"
@@ -213,22 +257,27 @@ def post_preview_controls_keyboard(
         else "🔘 افزودن دکمه شیشه‌ای (اختیاری)"
     )
 
-    return InlineKeyboardMarkup(
+    rows = [
         [
-            [
-                ib("📤 ارسال به کانال", callback_data="pb:send_ch", style="success"),
-                ib("📥 تحویل در پی‌وی", callback_data="pb:send_pv", style="success"),
-            ],
+            ib("📤 ارسال به کانال", callback_data="pb:send_ch", style="success"),
+            ib("📥 تحویل در پی‌وی", callback_data="pb:send_pv", style="success"),
+        ],
+    ]
+    if media_type == "link":
+        rows.append(
             [
                 ib(pos_label, callback_data="pb:toggle_pos", style="primary"),
                 ib(size_label, callback_data="pb:toggle_size", style="primary"),
-            ],
+            ]
+        )
+    rows.extend(
+        [
             [
                 ib(btns_label, callback_data="pb:btns", style="primary"),
             ],
             [
                 ib("✏️ ویرایش متن", callback_data="pb:edit_text", style="primary"),
-                ib("🖼 تغییر لینک عکس", callback_data="pb:edit_link", style="primary"),
+                ib("🖼 تغییر عکس / حالت", callback_data="pb:change_media", style="primary"),
             ],
             [
                 ib("✅ ذخیره و منوی اصلی", callback_data="pb:done", style="success"),
@@ -236,6 +285,7 @@ def post_preview_controls_keyboard(
             ],
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 def post_channels_keyboard(
@@ -439,6 +489,7 @@ def post_manage_detail_keyboard(
             )
         )
 
+    media_type = post.get("media_type") or "link"
     rows.extend(
         [
             [
@@ -446,8 +497,12 @@ def post_manage_detail_keyboard(
             ],
             [
                 ib("✏️ ویرایش متن", callback_data=f"pm:edit_text:{post_id}", style="primary"),
-                ib("🖼 تغییر لینک عکس", callback_data=f"pm:edit_link:{post_id}", style="primary"),
+                ib("🖼 تغییر عکس / حالت", callback_data=f"pm:media_menu:{post_id}", style="primary"),
             ],
+        ]
+    )
+    if media_type == "link":
+        rows.append(
             [
                 ib(
                     "⬆️/⬇️ جای پیش‌نمایش",
@@ -459,11 +514,12 @@ def post_manage_detail_keyboard(
                     callback_data=f"pm:toggle_size:{post_id}",
                     style="primary",
                 ),
-            ],
-            [
-                ib("🗑 حذف پست", callback_data=f"pm:del:{post_id}", style="danger"),
-                ib("◀️ بازگشت به لیست", callback_data="pm:list", style="danger"),
-            ],
+            ]
+        )
+    rows.append(
+        [
+            ib("🗑 حذف پست", callback_data=f"pm:del:{post_id}", style="danger"),
+            ib("◀️ بازگشت به لیست", callback_data="pm:list", style="danger"),
         ]
     )
     return InlineKeyboardMarkup(rows)

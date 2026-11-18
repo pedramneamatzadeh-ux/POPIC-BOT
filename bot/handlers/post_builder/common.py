@@ -1,5 +1,6 @@
 """هلپرهای مشترک فلوی ساخت پست (R15 پنل + R18 بستن سؤال تایپی)."""
 
+import html
 import logging
 from typing import Any, Dict
 
@@ -76,17 +77,25 @@ async def delete_answer_message(context: Any, message: Any) -> None:
 
 
 def build_control_summary(pb: Dict[str, Any]) -> str:
-    pos = "بالای متن ⬆️" if pb["show_above_text"] else "پایین متن ⬇️"
-    size = "بزرگ 🖼" if pb["prefer_large_media"] else "کوچک 🖼"
+    media_type = pb.get("media_type") or "link"
     text_len = len(pb.get("text") or "")
     btns_count = len(pb.get("buttons") or [])
+    max_len = 1024 if media_type == "photo" else 4096
 
     lines = [
         "🎛 <b>کنترل و انتشار پیش‌نمایش</b>",
-        f"• طول متن: {text_len} / 4096 کاراکتر",
-        f"• لینک عکس: {pb['photo_url']}",
-        f"• نمایش عکس: {pos} | اندازه: {size}",
+        f"• طول متن: {text_len} / {max_len} کاراکتر",
     ]
+    if media_type == "none":
+        lines.append("• وضعیت تصویر: بدون عکس")
+    elif media_type == "photo":
+        lines.append("• وضعیت تصویر: 📷 عکس عادی (روی پیام)")
+    else:
+        pos = "بالای متن ⬆️" if pb["show_above_text"] else "پایین متن ⬇️"
+        size = "بزرگ 🖼" if pb["prefer_large_media"] else "کوچک 🖼"
+        lines.append(f"• لینک عکس: {html.escape(pb.get('photo_url') or '')}")
+        lines.append(f"• نمایش عکس: {pos} | اندازه: {size}")
+
     if btns_count:
         lines.append(f"• دکمه‌های شیشه‌ای: {btns_count}")
     lines.append("")
@@ -140,17 +149,20 @@ async def send_or_refresh_preview(
             except TelegramError:
                 pass
 
+    media_type = pb.get("media_type") or "link"
     preview_msg = await send_post_to_chat(
         bot=context.bot,
         chat_id=chat_id,
         text=pb["text"],
         entities_json=pb["entities_json"],
-        photo_url=pb["photo_url"],
+        photo_url=pb.get("photo_url") or "",
         show_above_text=pb["show_above_text"],
         prefer_large_media=pb["prefer_large_media"],
         buttons=pb.get("buttons") or [],
         workspace_id=pb.get("ws_id"),
         post_id=pb.get("post_id"),
+        media_type=media_type,
+        photo_file_id=pb.get("photo_file_id") or "",
     )
     pb["preview_msg_id"] = preview_msg.message_id
 
@@ -161,6 +173,7 @@ async def send_or_refresh_preview(
             show_above_text=pb["show_above_text"],
             prefer_large_media=pb["prefer_large_media"],
             extra_buttons_count=len(pb.get("buttons") or []),
+            media_type=media_type,
         ),
         parse_mode="HTML",
         disable_web_page_preview=True,

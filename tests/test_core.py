@@ -152,6 +152,53 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(test_db.delete_post(post_id))
         self.assertIsNone(test_db.get_post(post_id))
 
+    def test_r9_media_schema_migration_and_modes(self) -> None:
+        import sqlite3
+
+        db_path = os.path.join(self._tmp.name, "legacy.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_text TEXT NOT NULL,
+                entities_json TEXT NOT NULL DEFAULT '[]',
+                photo_url TEXT NOT NULL,
+                show_above_text INTEGER NOT NULL DEFAULT 1,
+                prefer_large_media INTEGER NOT NULL DEFAULT 1,
+                buttons_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'draft',
+                target_channel_id INTEGER,
+                channel_message_id INTEGER,
+                channel_title TEXT,
+                channel_username TEXT,
+                created_by INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                published_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO posts (post_text, photo_url, created_by) VALUES (?, ?, ?)",
+            ("قدیمی", "https://t.me/pics/1", 100),
+        )
+        conn.commit()
+        conn.close()
+
+        legacy_db = Database(db_path)
+        legacy_db.init()
+        old_post = legacy_db.get_post(1)
+        self.assertEqual(old_post["media_type"], "link")
+        self.assertEqual(old_post["photo_file_id"], "")
+
+        none_id = legacy_db.create_post("بدون عکس", "[]", "", 100, media_type="none")
+        self.assertEqual(legacy_db.get_post(none_id)["media_type"], "none")
+
+        photo_id = legacy_db.create_post(
+            "عکس عادی", "[]", "", 100, media_type="photo", photo_file_id="FILE_123"
+        )
+        self.assertEqual(legacy_db.get_post(photo_id)["photo_file_id"], "FILE_123")
+
     def test_normalize_photo_url(self) -> None:
         self.assertEqual(
             normalize_photo_url("https://t.me/my_pics/42"),

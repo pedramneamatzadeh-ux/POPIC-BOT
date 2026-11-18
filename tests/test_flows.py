@@ -1,7 +1,9 @@
 import asyncio
+import io
 import os
 import tempfile
 import unittest
+import zipfile
 from types import SimpleNamespace
 
 from telegram import MessageEntity, ReplyKeyboardRemove
@@ -17,12 +19,16 @@ from bot.constants import (
     PM_BTN_EDIT_TEXT,
     PM_BTN_EDIT_VALUE,
     PM_DETAIL,
+    PM_EDIT_PHOTO,
     PM_LIST,
     POST_ADD_BTN_TEXT,
     POST_ADD_BTN_URL,
     POST_BTN_EDIT_TEXT,
     POST_BTN_EDIT_VALUE,
+    POST_EDIT_TEXT,
+    POST_MEDIA_CHOICE,
     POST_PHOTO_LINK,
+    POST_PHOTO_UPLOAD,
     POST_PREVIEW,
     POST_TEXT,
     SETTINGS_ADMIN,
@@ -48,12 +54,15 @@ from bot.handlers.post_builder import (
     cancel_from_inline,
     confirm_cancel_no,
     confirm_cancel_yes,
+    handle_media_choice_callback,
     handle_preview_callback,
     receive_btn_edit_text,
     receive_btn_edit_value,
     receive_btn_text,
     receive_btn_url,
+    receive_edit_text,
     receive_photo_link,
+    receive_photo_upload,
     receive_post_text,
     start_post_builder,
 )
@@ -64,6 +73,7 @@ from bot.handlers.post_manage import (
     receive_pm_btn_text,
     receive_pm_btn_url,
     receive_pm_edit_link,
+    receive_pm_edit_photo,
     receive_pm_edit_text,
     start_post_manage,
 )
@@ -84,7 +94,9 @@ class _FakeBot:
         self.id = bot_id
         self.username = "popic_test_bot"
         self.sent_messages = []
+        self.sent_photos = []
         self.edited_messages = []
+        self.edited_media = []
         self.edited_markups = []
         self.deleted_messages = []
         self.sent_documents = []
@@ -102,6 +114,12 @@ class _FakeBot:
         self.sent_messages.append(record)
         return SimpleNamespace(chat_id=chat_id, message_id=mid, text=text)
 
+    async def send_photo(self, chat_id, photo, **kwargs):
+        mid = self._alloc_mid()
+        record = {"chat_id": chat_id, "message_id": mid, "photo": photo, **kwargs}
+        self.sent_photos.append(record)
+        return SimpleNamespace(chat_id=chat_id, message_id=mid, caption=kwargs.get("caption", ""))
+
     async def edit_message_text(self, chat_id, message_id, text, **kwargs):
         record = {
             "chat_id": chat_id,
@@ -111,6 +129,16 @@ class _FakeBot:
         }
         self.edited_messages.append(record)
         return SimpleNamespace(chat_id=chat_id, message_id=message_id, text=text)
+
+    async def edit_message_media(self, chat_id, message_id, media, **kwargs):
+        record = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": media,
+            **kwargs,
+        }
+        self.edited_media.append(record)
+        return SimpleNamespace(chat_id=chat_id, message_id=message_id)
 
     async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
         self.edited_markups.append(
@@ -158,6 +186,7 @@ def _make_message(bot: _FakeBot, chat_id: int, user_id: int, text: str = "", **e
         message_id=mid,
         text=text,
         entities=extra.get("entities", ()),
+        photo=extra.get("photo", ()),
         forward_origin=extra.get("forward_origin"),
         forward_from=extra.get("forward_from"),
         forward_from_chat=extra.get("forward_from_chat"),
@@ -262,8 +291,15 @@ class FlowTests(unittest.TestCase):
             entities = [MessageEntity(type="bold", offset=0, length=10)]
             msg2 = _make_message(bot, 2000, 2000, long_text, entities=entities)
             state = await receive_post_text(_make_update(2000, 2000, message=msg2), ctx)
-            self.assertEqual(state, POST_PHOTO_LINK)
+            self.assertEqual(state, POST_MEDIA_CHOICE)
             self.assertIn("4000 کاراکتر", bot.edited_messages[-1]["text"])
+
+            choice_mid = ctx.user_data["_pb_question_mid"]
+            state = await handle_media_choice_callback(
+                _make_update(2000, 2000, callback_query=_make_query(bot, 2000, 2000, choice_mid, "pb:media:link")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PHOTO_LINK)
 
             priv_msg = _make_message(
                 bot,
@@ -333,6 +369,16 @@ class FlowTests(unittest.TestCase):
                 _make_update(4000, 4000, message=_make_message(bot, 4000, 4000, "متن خالص پی‌وی")),
                 ctx,
             )
+            await handle_media_choice_callback(
+                _make_update(
+                    4000,
+                    4000,
+                    callback_query=_make_query(
+                        bot, 4000, 4000, ctx.user_data["_pb_question_mid"], "pb:media:link"
+                    ),
+                ),
+                ctx,
+            )
             await receive_photo_link(
                 _make_update(4000, 4000, message=_make_message(bot, 4000, 4000, "https://t.me/pics/77")),
                 ctx,
@@ -368,6 +414,16 @@ class FlowTests(unittest.TestCase):
             )
             await receive_post_text(
                 _make_update(4500, 4500, message=_make_message(bot, 4500, 4500, "پست با دکمه‌های پیشرفته")),
+                ctx,
+            )
+            await handle_media_choice_callback(
+                _make_update(
+                    4500,
+                    4500,
+                    callback_query=_make_query(
+                        bot, 4500, 4500, ctx.user_data["_pb_question_mid"], "pb:media:link"
+                    ),
+                ),
                 ctx,
             )
             await receive_photo_link(
@@ -487,6 +543,16 @@ class FlowTests(unittest.TestCase):
             await start_post_builder(_make_update(3000, 3000, message=msg1), ctx)
             msg2 = _make_message(bot, 3000, 3000, "متن تست برای لغو")
             await receive_post_text(_make_update(3000, 3000, message=msg2), ctx)
+            await handle_media_choice_callback(
+                _make_update(
+                    3000,
+                    3000,
+                    callback_query=_make_query(
+                        bot, 3000, 3000, ctx.user_data["_pb_question_mid"], "pb:media:link"
+                    ),
+                ),
+                ctx,
+            )
             msg3 = _make_message(bot, 3000, 3000, "https://t.me/pics/5")
             state = await receive_photo_link(_make_update(3000, 3000, message=msg3), ctx)
             self.assertEqual(state, POST_PREVIEW)
@@ -688,13 +754,23 @@ class FlowTests(unittest.TestCase):
 
             adm_bk = _make_message(bot, 2000, 2000, "💾 بک‌آپ")
             await handle_backup(_make_update(2000, 2000, message=adm_bk), ctx)
-            self.assertEqual(bot.sent_messages[-1]["text"], Msg.OWNER_ONLY_FEATURE)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.ENV_OWNER_ONLY_BACKUP)
 
             # In admin mode, 2000 creates a post -> saved in 1000's DB, NOT 2000's DB
             pb_s = _make_message(bot, 2000, 2000, "📝 ساخت پست جدید")
             await start_post_builder(_make_update(2000, 2000, message=pb_s), ctx)
             await receive_post_text(
                 _make_update(2000, 2000, message=_make_message(bot, 2000, 2000, "پست ادمین")),
+                ctx,
+            )
+            await handle_media_choice_callback(
+                _make_update(
+                    2000,
+                    2000,
+                    callback_query=_make_query(
+                        bot, 2000, 2000, ctx.user_data["_pb_question_mid"], "pb:media:link"
+                    ),
+                ),
                 ctx,
             )
             await receive_photo_link(
@@ -776,12 +852,167 @@ class FlowTests(unittest.TestCase):
             res = await handle_stats_callback(_make_update(1000, 1000, callback_query=q_close), ctx)
             self.assertEqual(res, ConversationHandler.END)
 
-            # R3: Backup sends ONLY .db file (never .env)
+            # R10: Non-env-owner (even owner of own workspace 5555) cannot use backup
+            pub_bk = _make_message(bot, 5555, 5555, "💾 بک‌آپ")
+            get_workspace_db(5555)
+            await handle_backup(_make_update(5555, 5555, message=pub_bk), ctx)
+            self.assertEqual(len(bot.sent_documents), 0)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.ENV_OWNER_ONLY_BACKUP)
+
+            # R10: Env owner (1000) receives .zip with registry.db + workspaces/user_*.db (never .env)
             own_bk = _make_message(bot, 1000, 1000, "💾 بک‌آپ")
             await handle_backup(_make_update(1000, 1000, message=own_bk), ctx)
             self.assertEqual(len(bot.sent_documents), 1)
-            self.assertTrue(bot.sent_documents[0]["filename"].endswith(".db"))
-            self.assertNotIn(".env", bot.sent_documents[0]["filename"])
+            self.assertTrue(bot.sent_documents[0]["filename"].endswith(".zip"))
+            with zipfile.ZipFile(io.BytesIO(bot.sent_documents[0]["data"]), "r") as zf:
+                names = set(zf.namelist())
+            self.assertIn("registry.db", names)
+            self.assertIn("workspaces/user_1000.db", names)
+            self.assertIn("workspaces/user_5555.db", names)
+            self.assertFalse(any(".env" in n for n in names))
+
+        asyncio.run(run())
+
+    def test_r9_media_modes_none_photo_and_1024_guard(self) -> None:
+        async def run():
+            bot = _FakeBot()
+            ctx = _make_context(bot)
+            ws_db = get_workspace_db(6000)
+            ws_db.add_target_channel(-100888, "R9 Channel", "r9_ch", 6000)
+
+            # 1) Plain text post (media_type='none') -> LinkPreviewOptions(is_disabled=True)
+            await start_post_builder(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "📝 ساخت پست جدید")),
+                ctx,
+            )
+            state = await receive_post_text(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "پست متنی بدون عکس https://t.me/a/1")),
+                ctx,
+            )
+            self.assertEqual(state, POST_MEDIA_CHOICE)
+            prompt_mid = ctx.user_data["_pb_question_mid"]
+            state = await handle_media_choice_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, prompt_mid, "pb:media:none")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PREVIEW)
+            preview_none = bot.sent_messages[-2]
+            self.assertTrue(preview_none["link_preview_options"].is_disabled)
+            self.assertEqual(len(bot.sent_photos), 0)
+
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+            await handle_preview_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, ctrl_mid, "pb:done")),
+                ctx,
+            )
+            p_none = ws_db.get_post(1)
+            self.assertEqual(p_none["media_type"], "none")
+
+            # 2) Regular photo with text > 1024 -> warns and offers switch or text edit
+            await start_post_builder(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "📝 ساخت پست جدید")),
+                ctx,
+            )
+            state = await receive_post_text(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "ب" * 1200)),
+                ctx,
+            )
+            self.assertEqual(state, POST_MEDIA_CHOICE)
+            prompt_mid = ctx.user_data["_pb_question_mid"]
+
+            state = await handle_media_choice_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, prompt_mid, "pb:media:photo")),
+                ctx,
+            )
+            self.assertEqual(state, POST_MEDIA_CHOICE)
+            self.assertIn("1200", bot.edited_messages[-1]["text"])
+
+            # User clicks pb:edit_text_pre -> POST_EDIT_TEXT -> sends 500-char text -> returns to POST_MEDIA_CHOICE
+            state = await handle_media_choice_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, prompt_mid, "pb:edit_text_pre")),
+                ctx,
+            )
+            self.assertEqual(state, POST_EDIT_TEXT)
+            state = await receive_edit_text(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "کپشن کوتاه و مناسب")),
+                ctx,
+            )
+            self.assertEqual(state, POST_MEDIA_CHOICE)
+
+            # Now choose regular photo -> POST_PHOTO_UPLOAD
+            prompt_mid = ctx.user_data["_pb_question_mid"]
+            state = await handle_media_choice_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, prompt_mid, "pb:media:photo")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PHOTO_UPLOAD)
+
+            # Non-photo input warns and stays in POST_PHOTO_UPLOAD
+            state = await receive_photo_upload(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "این عکس نیست")),
+                ctx,
+            )
+            self.assertEqual(state, POST_PHOTO_UPLOAD)
+            self.assertEqual(bot.sent_messages[-1]["text"], Msg.POST_PHOTO_REQUIRED)
+
+            # Real photo -> POST_PREVIEW via send_photo
+            photo_msg = _make_message(
+                bot,
+                6000,
+                6000,
+                "",
+                photo=[SimpleNamespace(file_id="SMALL"), SimpleNamespace(file_id="BIG_FILE_ID")],
+            )
+            state = await receive_photo_upload(_make_update(6000, 6000, message=photo_msg), ctx)
+            self.assertEqual(state, POST_PREVIEW)
+            self.assertEqual(len(bot.sent_photos), 1)
+            self.assertEqual(bot.sent_photos[0]["photo"], "BIG_FILE_ID")
+            self.assertEqual(bot.sent_photos[0]["caption"], "کپشن کوتاه و مناسب")
+
+            # Publish to channel -> saved with media_type='photo' and sent via send_photo
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+            state = await handle_preview_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, ctrl_mid, "pb:send_ch")),
+                ctx,
+            )
+            self.assertEqual(state, ConversationHandler.END)
+            p_photo = ws_db.get_post(2)
+            self.assertEqual(p_photo["media_type"], "photo")
+            self.assertEqual(p_photo["photo_file_id"], "BIG_FILE_ID")
+            self.assertEqual(len([p for p in bot.sent_photos if p["chat_id"] == -100888]), 1)
+
+            # 3) Manage saved post: switch media photo -> new photo -> update channel via edit_message_media
+            await start_post_manage(
+                _make_update(6000, 6000, message=_make_message(bot, 6000, 6000, "📂 پست‌های ذخیره‌شده")),
+                ctx,
+            )
+            pm_mid = ctx.user_data["pm"]["msg_id"]
+            await handle_post_manage_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, pm_mid, f"pm:detail:{p_photo['id']}")),
+                ctx,
+            )
+            state = await handle_post_manage_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, pm_mid, f"pm:{p_photo['id']}:media:photo")),
+                ctx,
+            )
+            self.assertEqual(state, PM_EDIT_PHOTO)
+            new_photo_msg = _make_message(
+                bot,
+                6000,
+                6000,
+                "",
+                photo=[SimpleNamespace(file_id="NEW_PHOTO_ID")],
+            )
+            state = await receive_pm_edit_photo(_make_update(6000, 6000, message=new_photo_msg), ctx)
+            self.assertEqual(state, PM_DETAIL)
+            self.assertEqual(ws_db.get_post(p_photo["id"])["photo_file_id"], "NEW_PHOTO_ID")
+
+            await handle_post_manage_callback(
+                _make_update(6000, 6000, callback_query=_make_query(bot, 6000, 6000, pm_mid, f"pm:update_ch:{p_photo['id']}")),
+                ctx,
+            )
+            self.assertEqual(len(bot.edited_media), 1)
+            self.assertEqual(bot.edited_media[0]["media"].media, "NEW_PHOTO_ID")
 
         asyncio.run(run())
 

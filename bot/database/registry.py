@@ -241,3 +241,11 @@ class RegistryDatabase:
             "total_users": int(total_users),
             "total_admin_links": int(total_admin_links),
         }
+
+    def wal_checkpoint(self) -> None:
+        """محتوای WAL را به فایل اصلی registry.db منتقل می‌کند."""
+        try:
+            with self.connect() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass

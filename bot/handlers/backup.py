@@ -2,49 +2,71 @@ import logging
 import os
 import shutil
 import tempfile
+import zipfile
+from datetime import datetime, timezone
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from ..decorators import workspace_owner_only
+from ..config import config
+from ..database import Database, registry
+from ..decorators import env_owner_only
 from ..keyboards import main_menu_for
 
 logger = logging.getLogger(__name__)
 
 
-@workspace_owner_only
+@env_owner_only
 async def handle_backup(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     user_id = update.effective_user.id
     chat_id = update.message.chat_id
-    ws_db = context.user_data["_ws_db"]
 
-    await update.message.reply_text("💾 در حال تهیه بک‌آپ از دیتابیس شما...")
-
-    db_path = os.path.abspath(ws_db.path)
-    if not os.path.exists(db_path):
-        await update.message.reply_text(
-            "❌ فایل دیتابیس شما پیدا نشد!",
-            reply_markup=main_menu_for(user_id),
-        )
-        return
+    await update.message.reply_text("💾 در حال تهیه بک‌آپ کامل دیتابیس‌های ربات...")
 
     tmp_dir = None
     try:
         tmp_dir = tempfile.mkdtemp()
-        backup_name = f"backup_{os.path.basename(db_path)}"
-        backup_path = os.path.join(tmp_dir, backup_name)
-        ws_db.wal_checkpoint()
-        shutil.copy2(db_path, backup_path)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        zip_name = f"backup_popic_data_{stamp}.zip"
+        zip_path = os.path.join(tmp_dir, zip_name)
 
-        with open(backup_path, "rb") as backup_file:
+        added_count = 0
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            reg_path = os.path.abspath(registry.path)
+            if os.path.exists(reg_path):
+                registry.wal_checkpoint()
+                zf.write(reg_path, arcname="registry.db")
+                added_count += 1
+
+            if os.path.isdir(config.WORKSPACES_DIR):
+                for fname in sorted(os.listdir(config.WORKSPACES_DIR)):
+                    if not (fname.startswith("user_") and fname.endswith(".db")):
+                        continue
+                    ws_path = os.path.join(config.WORKSPACES_DIR, fname)
+                    if not os.path.isfile(ws_path):
+                        continue
+                    Database(ws_path).wal_checkpoint()
+                    zf.write(ws_path, arcname=os.path.join("workspaces", fname))
+                    added_count += 1
+
+        if added_count == 0:
+            await update.message.reply_text(
+                "❌ هیچ فایل دیتابیسی برای بک‌آپ پیدا نشد!",
+                reply_markup=main_menu_for(user_id),
+            )
+            return
+
+        with open(zip_path, "rb") as backup_file:
             await context.bot.send_document(
                 chat_id=chat_id,
                 document=backup_file,
-                filename=backup_name,
-                caption="💾 بک‌آپ دیتابیس اختصاصی شما با موفقیت تهیه شد.",
+                filename=zip_name,
+                caption=(
+                    f"💾 بک‌آپ کامل دیتابیس‌های ربات ({added_count} فایل) با موفقیت تهیه شد."
+                ),
             )
     except Exception as err:
         logger.exception("خطا در تهیه بک‌آپ: %s", err)
