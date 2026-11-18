@@ -13,6 +13,8 @@ class PostsMixin:
         show_above_text: bool = True,
         prefer_large_media: bool = True,
         buttons_json: str = "[]",
+        media_type: str = "link",
+        photo_file_id: str = "",
     ) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -20,19 +22,23 @@ class PostsMixin:
                 INSERT INTO posts (
                     post_text,
                     entities_json,
+                    media_type,
                     photo_url,
+                    photo_file_id,
                     show_above_text,
                     prefer_large_media,
                     buttons_json,
                     status,
                     created_by
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
                 """,
                 (
                     post_text,
                     entities_json or "[]",
-                    photo_url,
+                    media_type or "link",
+                    photo_url or "",
+                    photo_file_id or "",
                     1 if show_above_text else 0,
                     1 if prefer_large_media else 0,
                     buttons_json or "[]",
@@ -78,7 +84,9 @@ class PostsMixin:
         *,
         post_text: Optional[str] = None,
         entities_json: Optional[str] = None,
+        media_type: Optional[str] = None,
         photo_url: Optional[str] = None,
+        photo_file_id: Optional[str] = None,
         show_above_text: Optional[bool] = None,
         prefer_large_media: Optional[bool] = None,
         buttons_json: Optional[str] = None,
@@ -92,9 +100,15 @@ class PostsMixin:
         if entities_json is not None:
             sets.append("entities_json = ?")
             params.append(entities_json)
+        if media_type is not None:
+            sets.append("media_type = ?")
+            params.append(media_type)
         if photo_url is not None:
             sets.append("photo_url = ?")
             params.append(photo_url)
+        if photo_file_id is not None:
+            sets.append("photo_file_id = ?")
+            params.append(photo_file_id)
         if show_above_text is not None:
             sets.append("show_above_text = ?")
             params.append(1 if show_above_text else 0)

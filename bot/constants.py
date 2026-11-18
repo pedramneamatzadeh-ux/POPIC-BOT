@@ -7,7 +7,7 @@
 #   • تغییر شکستنی (env/schema/state)  ⇒ major  (X.0.0)
 # ============================================================================
 
-BOT_VERSION = "0.3.0"
+BOT_VERSION = "0.4.0"
 BOT_VERSION_DATE = "2026-11-17"
 
 
@@ -18,6 +18,8 @@ BOT_VERSION_DATE = "2026-11-17"
 # فلوی ساخت پست جدید
 (
     POST_TEXT,
+    POST_MEDIA_CHOICE,
+    POST_PHOTO_UPLOAD,
     POST_PHOTO_LINK,
     POST_PREVIEW,
     POST_EDIT_TEXT,
@@ -27,7 +29,7 @@ BOT_VERSION_DATE = "2026-11-17"
     POST_SELECT_CHANNEL,
     POST_BTN_EDIT_TEXT,
     POST_BTN_EDIT_VALUE,
-) = range(10)
+) = range(12)
 
 # مدیریت پست‌های ذخیره‌شده
 (
@@ -35,15 +37,16 @@ BOT_VERSION_DATE = "2026-11-17"
     PM_DETAIL,
     PM_EDIT_TEXT,
     PM_EDIT_LINK,
+    PM_EDIT_PHOTO,
     PM_SELECT_CHANNEL,
     PM_ADD_BTN_TEXT,
     PM_ADD_BTN_URL,
     PM_BTN_EDIT_TEXT,
     PM_BTN_EDIT_VALUE,
-) = range(10, 19)
+) = range(12, 22)
 
 # آمار
-STATS_VIEW = 19
+STATS_VIEW = 22
 
 # پنل تنظیمات (فقط مالک فضای کاری)
 (
@@ -51,13 +54,14 @@ STATS_VIEW = 19
     SETTINGS_ADMIN,
     SETTINGS_CHANNEL,
     SETTINGS_BTN_LABEL,
-) = range(20, 24)
+) = range(23, 27)
 
 
 SETTINGS_BUTTON = "⚙️ تنظیمات"
 SWITCH_WORKSPACE_BUTTON = "🔄 تغییر فضا / نقش"
 
 MAX_POST_TEXT_LENGTH = 4096
+MAX_CAPTION_LENGTH = 1024
 MAX_BUTTON_TEXT_LENGTH = 64
 MAX_EXTRA_BUTTONS = 12
 MAX_BUTTONS_PER_ROW = 4
@@ -68,8 +72,11 @@ DEFAULT_POPUP_TEXT = "این دکمه نمایشی است"
 
 class Msg:
     ACCESS_DENIED = "❌ دسترسی غیرمجاز!"
+    ENV_OWNER_ONLY_BACKUP = (
+        "⛔ امکان بک‌آپ‌گیری فقط برای مالک اصلی ربات فعال است."
+    )
     OWNER_ONLY_FEATURE = (
-        "⛔ در حالت ادمین دسترسی به تنظیمات و بک‌آپ ندارید!\n"
+        "⛔ در حالت ادمین دسترسی به تنظیمات ندارید!\n"
         "برای دسترسی به فضای شخصی خودتان، دکمه «🔄 تغییر فضا / نقش» یا /start را بزنید."
     )
     MAIN_MENU_PROMPT = "منوی اصلی:"
@@ -117,8 +124,26 @@ class Msg:
     POST_TEXT_TOO_LONG = (
         "❌ متن شما {length} کاراکتر است؛ حداکثر مجاز ۴۰۹۶ کاراکتر است."
     )
+    POST_ASK_MEDIA_CHOICE = (
+        "🖼 وضعیت عکس این پست را انتخاب کن:\n\n"
+        "1️⃣ **بدون عکس:** پست کاملاً متنی ارسال می‌شود.\n"
+        "2️⃣ **عکس عادی:** عکس مستقیماً روی پیام قرار می‌گیرد (محدودیت ۱۰۲۴ کاراکتر کپشن).\n"
+        "3️⃣ **عکس به صورت لینک:** پیش‌نمایش عکس داخل پیام متنی تا ۴۰۹۶ کاراکتر."
+    )
+    POST_CAPTION_TOO_LONG = (
+        "⚠️ متن شما {length} کاراکتر است، اما در تلگرام کپشنِ «عکس عادی» "
+        "حداکثر ۱۰۲۴ کاراکتر مجاز است!\n\n"
+        "می‌توانی عکس را به صورت لینک اضافه کنی (تا ۴۰۹۶ کاراکتر)، متن را "
+        "کوتاه‌تر کنی یا بدون عکس ادامه دهی:"
+    )
+    POST_ASK_PHOTO_UPLOAD = (
+        "📷 حالا خود عکس را به صورت مستقیم بفرست (یا از چت/کانال دیگر فوروارد کن):"
+    )
+    POST_PHOTO_REQUIRED = (
+        "❌ لطفاً یک **عکس** ارسال کن (نه متن یا فایل متفرقه)."
+    )
     POST_ASK_PHOTO_LINK = (
-        "🖼 حالا لینک پست عکس در کانال عمومی جداگانه را بفرست\n"
+        "🔗 حالا لینک پست عکس در کانال عمومی جداگانه را بفرست\n"
         "(یا خود پیام عکس را مستقیماً از کانال عمومی عکس‌ها به اینجا فوروارد کن):\n\n"
         "مثال: https://t.me/my_photos/42"
     )

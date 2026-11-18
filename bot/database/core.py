@@ -52,7 +52,9 @@ class CoreMixin:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     post_text TEXT NOT NULL,
                     entities_json TEXT NOT NULL DEFAULT '[]',
-                    photo_url TEXT NOT NULL,
+                    media_type TEXT NOT NULL DEFAULT 'link',
+                    photo_url TEXT NOT NULL DEFAULT '',
+                    photo_file_id TEXT NOT NULL DEFAULT '',
                     show_above_text INTEGER NOT NULL DEFAULT 1,
                     prefer_large_media INTEGER NOT NULL DEFAULT 1,
                     buttons_json TEXT NOT NULL DEFAULT '[]',
@@ -90,6 +92,18 @@ class CoreMixin:
                     ON post_deliveries(post_id);
                 """
             )
+            existing_cols = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(posts)").fetchall()
+            }
+            if "media_type" not in existing_cols:
+                connection.execute(
+                    "ALTER TABLE posts ADD COLUMN media_type TEXT NOT NULL DEFAULT 'link'"
+                )
+            if "photo_file_id" not in existing_cols:
+                connection.execute(
+                    "ALTER TABLE posts ADD COLUMN photo_file_id TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute("PRAGMA journal_mode = WAL")
 
     def wal_checkpoint(self) -> None:

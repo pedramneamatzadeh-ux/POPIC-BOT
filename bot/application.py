@@ -22,6 +22,7 @@ from .constants import (
     PM_BTN_EDIT_VALUE,
     PM_DETAIL,
     PM_EDIT_LINK,
+    PM_EDIT_PHOTO,
     PM_EDIT_TEXT,
     PM_LIST,
     PM_SELECT_CHANNEL,
@@ -31,7 +32,9 @@ from .constants import (
     POST_BTN_EDIT_VALUE,
     POST_EDIT_LINK,
     POST_EDIT_TEXT,
+    POST_MEDIA_CHOICE,
     POST_PHOTO_LINK,
+    POST_PHOTO_UPLOAD,
     POST_PREVIEW,
     POST_SELECT_CHANNEL,
     POST_TEXT,
@@ -55,6 +58,7 @@ from .handlers.post_builder import (
     cancel_from_inline,
     confirm_cancel_no,
     confirm_cancel_yes,
+    handle_media_choice_callback,
     handle_preview_callback,
     receive_btn_edit_text,
     receive_btn_edit_value,
@@ -63,6 +67,7 @@ from .handlers.post_builder import (
     receive_edit_link,
     receive_edit_text,
     receive_photo_link,
+    receive_photo_upload,
     receive_post_text,
     start_post_builder,
 )
@@ -73,6 +78,7 @@ from .handlers.post_manage import (
     receive_pm_btn_text,
     receive_pm_btn_url,
     receive_pm_edit_link,
+    receive_pm_edit_photo,
     receive_pm_edit_text,
     start_post_manage,
 )
@@ -149,6 +155,11 @@ def create_application() -> Application:
         & ~filters.COMMAND
         & ~filters.Regex(PANEL_BUTTONS_PATTERN)
     )
+    photo_input_filter = (
+        (filters.PHOTO | filters.TEXT | filters.Document.ALL)
+        & ~filters.COMMAND
+        & ~filters.Regex(PANEL_BUTTONS_PATTERN)
+    )
 
     post_builder_conv = ConversationHandler(
         entry_points=[
@@ -162,8 +173,18 @@ def create_application() -> Application:
                 MessageHandler(text_input_filter, receive_post_text),
                 *cancel_inline_handlers,
             ],
+            POST_MEDIA_CHOICE: [
+                CallbackQueryHandler(handle_media_choice_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
+            ],
+            POST_PHOTO_UPLOAD: [
+                MessageHandler(photo_input_filter, receive_photo_upload),
+                CallbackQueryHandler(handle_media_choice_callback, pattern=r"^pb:"),
+                *cancel_inline_handlers,
+            ],
             POST_PHOTO_LINK: [
                 MessageHandler(forward_or_text, receive_photo_link),
+                CallbackQueryHandler(handle_media_choice_callback, pattern=r"^pb:"),
                 *cancel_inline_handlers,
             ],
             POST_PREVIEW: [
@@ -176,6 +197,7 @@ def create_application() -> Application:
             ],
             POST_EDIT_TEXT: [
                 MessageHandler(text_input_filter, receive_edit_text),
+                CallbackQueryHandler(handle_media_choice_callback, pattern=r"^pb:media_menu$"),
                 CallbackQueryHandler(handle_preview_callback, pattern=r"^pb:"),
                 *cancel_inline_handlers,
             ],
@@ -240,6 +262,10 @@ def create_application() -> Application:
             ],
             PM_EDIT_LINK: [
                 MessageHandler(forward_or_text, receive_pm_edit_link),
+                CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
+            ],
+            PM_EDIT_PHOTO: [
+                MessageHandler(photo_input_filter, receive_pm_edit_photo),
                 CallbackQueryHandler(handle_post_manage_callback, pattern=r"^pm:"),
             ],
             PM_ADD_BTN_TEXT: [

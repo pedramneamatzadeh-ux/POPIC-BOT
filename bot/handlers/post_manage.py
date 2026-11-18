@@ -12,6 +12,7 @@ from ..config import config
 from ..constants import (
     DEFAULT_POPUP_TEXT,
     MAX_BUTTON_TEXT_LENGTH,
+    MAX_CAPTION_LENGTH,
     MAX_COPY_TEXT_LENGTH,
     MAX_EXTRA_BUTTONS,
     MAX_POPUP_TEXT_LENGTH,
@@ -22,6 +23,7 @@ from ..constants import (
     PM_BTN_EDIT_VALUE,
     PM_DETAIL,
     PM_EDIT_LINK,
+    PM_EDIT_PHOTO,
     PM_EDIT_TEXT,
     PM_LIST,
     PM_SELECT_CHANNEL,
@@ -36,6 +38,7 @@ from ..keyboards import (
     post_channels_keyboard,
     post_manage_detail_keyboard,
     post_manage_list_keyboard,
+    post_media_choice_keyboard,
     settings_confirm_keyboard,
 )
 from ..services.button_ui import (
@@ -78,8 +81,7 @@ def _list_text(total: int, page: int, pages: int) -> str:
 
 
 def _detail_text(post: Dict[str, Any]) -> str:
-    pos = "بالای متن ⬆️" if post.get("show_above_text") else "پایین متن ⬇️"
-    size = "بزرگ 🖼" if post.get("prefer_large_media") else "کوچک 🖼"
+    media_type = post.get("media_type") or "link"
     buttons = deserialize_buttons(post.get("buttons_json"))
     snippet = html.escape(shorten_text(post.get("post_text") or "", 180))
     status_label = (
@@ -93,11 +95,23 @@ def _detail_text(post: Dict[str, Any]) -> str:
         "",
         f"• وضعیت: {status_label}",
         f"• طول متن: {len(post.get('post_text') or '')} کاراکتر",
-        f"• لینک عکس: {html.escape(post.get('photo_url') or '')}",
-        f"• پیش‌نمایش: {pos} | اندازه: {size}",
-        f"• دکمه‌های شیشه‌ای: {len(buttons)}",
-        f"• تاریخ ثبت: {html.escape(fmt_tehran(post.get('created_at')))}",
     ]
+    if media_type == "none":
+        lines.append("• تصویر: بدون عکس")
+    elif media_type == "photo":
+        lines.append("• تصویر: 📷 عکس عادی (روی پیام)")
+    else:
+        pos = "بالای متن ⬆️" if post.get("show_above_text") else "پایین متن ⬇️"
+        size = "بزرگ 🖼" if post.get("prefer_large_media") else "کوچک 🖼"
+        lines.append(f"• لینک عکس: {html.escape(post.get('photo_url') or '')}")
+        lines.append(f"• پیش‌نمایش: {pos} | اندازه: {size}")
+
+    lines.extend(
+        [
+            f"• دکمه‌های شیشه‌ای: {len(buttons)}",
+            f"• تاریخ ثبت: {html.escape(fmt_tehran(post.get('created_at')))}",
+        ]
+    )
 
     if post.get("target_channel_id") and post.get("channel_message_id"):
         ch_name = html.escape(
@@ -350,12 +364,14 @@ async def _publish_saved_post(
             chat_id=channel["chat_id"],
             text=post["post_text"],
             entities_json=post.get("entities_json"),
-            photo_url=post["photo_url"],
+            photo_url=post.get("photo_url") or "",
             show_above_text=bool(post.get("show_above_text")),
             prefer_large_media=bool(post.get("prefer_large_media")),
             buttons=buttons,
             workspace_id=ws_id,
             post_id=post_id,
+            media_type=post.get("media_type") or "link",
+            photo_file_id=post.get("photo_file_id") or "",
         )
     except TelegramError as exc:
         return PM_DETAIL, Msg.CHANNEL_SEND_FAILED.format(error=exc)
@@ -499,8 +515,60 @@ async def handle_post_manage_callback(
             context, ws_db, chat_id, int(parts[2]), int(parts[3]), message_id=msg_id
         )
 
-    # عملیات بازرس دکمه: pm:<post_id>:<action>:<idx>[:extra]
+    # تغییر وضعیت تصویر پست: pm:<post_id>:media:<none|photo|link>
     parts = data.split(":")
+    if len(parts) == 4 and parts[1].isdigit() and parts[2] == "media":
+        post_id = int(parts[1])
+        mode = parts[3]
+        post = ws_db.get_post(post_id)
+        if not post:
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        if mode == "none":
+            ws_db.update_post(
+                post_id,
+                media_type="none",
+                photo_url="",
+                photo_file_id="",
+            )
+            await query.answer("✅ حالت تصویر به «بدون عکس» تغییر یافت.")
+            return await _render_detail(context, ws_db, chat_id, post_id, message_id=msg_id)
+        if mode == "photo":
+            text_len = len(post.get("post_text") or "")
+            if text_len > MAX_CAPTION_LENGTH:
+                await query.answer(
+                    f"⚠️ متن این پست {text_len} کاراکتر است؛ در حالت عکس عادی حداکثر ۱۰۲۴ کاراکتر مجاز است!",
+                    show_alert=True,
+                )
+                return PM_DETAIL
+            pm["post_id"] = post_id
+            pm["msg_id"] = msg_id
+            await query.answer()
+            pm["msg_id"] = await safe_edit_or_send(
+                context=context,
+                chat_id=chat_id,
+                text=Msg.POST_ASK_PHOTO_UPLOAD,
+                reply_markup=input_back_keyboard(f"pm:media_menu:{post_id}"),
+                message_id=msg_id,
+            )
+            return PM_EDIT_PHOTO
+        if mode == "link":
+            pm["post_id"] = post_id
+            pm["msg_id"] = msg_id
+            await query.answer()
+            pm["msg_id"] = await safe_edit_or_send(
+                context=context,
+                chat_id=chat_id,
+                text=Msg.POST_ASK_PHOTO_LINK,
+                reply_markup=input_back_keyboard(f"pm:media_menu:{post_id}"),
+                message_id=msg_id,
+                disable_web_page_preview=True,
+            )
+            return PM_EDIT_LINK
+        await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+        return PM_DETAIL
+
+    # عملیات بازرس دکمه: pm:<post_id>:<action>:<idx>[:extra]
     if len(parts) >= 4 and parts[1].isdigit():
         post_id = int(parts[1])
         action = parts[2]
@@ -635,12 +703,14 @@ async def handle_post_manage_callback(
                 chat_id=chat_id,
                 text=post["post_text"],
                 entities_json=post.get("entities_json"),
-                photo_url=post["photo_url"],
+                photo_url=post.get("photo_url") or "",
                 show_above_text=bool(post.get("show_above_text")),
                 prefer_large_media=bool(post.get("prefer_large_media")),
                 buttons=deserialize_buttons(post.get("buttons_json")),
                 workspace_id=ws_id,
                 post_id=post["id"],
+                media_type=post.get("media_type") or "link",
+                photo_file_id=post.get("photo_file_id") or "",
             )
             ws_db.record_delivery(
                 post_id=post["id"],
@@ -720,12 +790,14 @@ async def handle_post_manage_callback(
                 message_id=post["channel_message_id"],
                 text=post["post_text"],
                 entities_json=post.get("entities_json"),
-                photo_url=post["photo_url"],
+                photo_url=post.get("photo_url") or "",
                 show_above_text=bool(post.get("show_above_text")),
                 prefer_large_media=bool(post.get("prefer_large_media")),
                 buttons=deserialize_buttons(post.get("buttons_json")),
                 workspace_id=ws_id,
                 post_id=post["id"],
+                media_type=post.get("media_type") or "link",
+                photo_file_id=post.get("photo_file_id") or "",
             )
             await query.answer("✅ پست در کانال به‌روزرسانی شد!", show_alert=True)
         except TelegramError as exc:
@@ -774,6 +846,28 @@ async def handle_post_manage_callback(
             message_id=msg_id,
         )
         return PM_EDIT_TEXT
+
+    if data.startswith("pm:media_menu:"):
+        raw = data.split(":", 2)[2]
+        if not raw.isdigit() or not ws_db.get_post(int(raw)):
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        post_id = int(raw)
+        pm["post_id"] = post_id
+        pm["msg_id"] = msg_id
+        await query.answer()
+        pm["msg_id"] = await safe_edit_or_send(
+            context=context,
+            chat_id=chat_id,
+            text=Msg.POST_ASK_MEDIA_CHOICE,
+            reply_markup=post_media_choice_keyboard(
+                prefix=f"pm:{post_id}",
+                back_callback=f"pm:detail:{post_id}",
+                include_cancel=False,
+            ),
+            message_id=msg_id,
+        )
+        return PM_DETAIL
 
     if data.startswith("pm:edit_link:"):
         raw = data.split(":", 2)[2]
@@ -853,11 +947,57 @@ async def receive_pm_edit_text(
         register_panel_message(context, sent.message_id)
         return PM_EDIT_TEXT
 
+    post = ws_db.get_post(post_id)
+    if post and (post.get("media_type") or "link") == "photo" and len(message.text) > MAX_CAPTION_LENGTH:
+        sent = await message.reply_text(
+            f"❌ در حالت «عکس عادی» کپشن حداکثر {MAX_CAPTION_LENGTH} کاراکتر است "
+            f"(متن شما {len(message.text)} کاراکتر است).",
+            reply_markup=input_back_keyboard(f"pm:detail:{post_id}"),
+        )
+        register_panel_message(context, sent.message_id)
+        return PM_EDIT_TEXT
+
     ws_db.update_post(
         post_id,
         post_text=message.text,
         entities_json=serialize_entities(message.entities),
     )
+    return await _render_detail(
+        context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
+    )
+
+
+@workspace_access
+async def receive_pm_edit_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    ws_db = context.user_data["_ws_db"]
+    pm = context.user_data.get("pm") or {}
+    post_id = pm.get("post_id")
+    if not post_id:
+        return ConversationHandler.END
+
+    photos = getattr(message, "photo", None)
+    if not photos:
+        sent = await message.reply_text(
+            Msg.POST_PHOTO_REQUIRED,
+            reply_markup=input_back_keyboard(f"pm:media_menu:{post_id}"),
+        )
+        register_panel_message(context, sent.message_id)
+        return PM_EDIT_PHOTO
+
+    ws_db.update_post(
+        post_id,
+        media_type="photo",
+        photo_file_id=photos[-1].file_id,
+        photo_url="",
+    )
+    try:
+        await message.delete()
+    except TelegramError:
+        pass
     return await _render_detail(
         context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
     )
@@ -897,7 +1037,12 @@ async def receive_pm_edit_link(
         register_panel_message(context, sent.message_id)
         return PM_EDIT_LINK
 
-    ws_db.update_post(post_id, photo_url=photo_url)
+    ws_db.update_post(
+        post_id,
+        media_type="link",
+        photo_url=photo_url,
+        photo_file_id="",
+    )
     return await _render_detail(
         context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
     )

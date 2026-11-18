@@ -8,6 +8,7 @@ from telegram import (
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     LinkPreviewOptions,
     Message,
     MessageEntity,
@@ -395,24 +396,39 @@ async def send_post_to_chat(
     chat_id: int,
     text: str,
     entities_json: Optional[str],
-    photo_url: str,
+    photo_url: str = "",
     show_above_text: bool = True,
     prefer_large_media: bool = True,
     buttons: Optional[List[Dict[str, Any]]] = None,
     workspace_id: Optional[int] = None,
     post_id: Optional[int] = None,
+    media_type: str = "link",
+    photo_file_id: str = "",
 ) -> Message:
     entities = deserialize_entities(entities_json)
-    preview = build_link_preview_options(
-        photo_url=photo_url,
-        show_above_text=show_above_text,
-        prefer_large_media=prefer_large_media,
-    )
     markup = build_buttons_markup(
         buttons,
         workspace_id=workspace_id,
         post_id=post_id,
     )
+
+    if media_type == "photo" and photo_file_id:
+        return await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file_id,
+            caption=text,
+            caption_entities=entities,
+            reply_markup=markup,
+        )
+
+    if media_type == "none" or not photo_url:
+        preview = LinkPreviewOptions(is_disabled=True)
+    else:
+        preview = build_link_preview_options(
+            photo_url=photo_url,
+            show_above_text=show_above_text,
+            prefer_large_media=prefer_large_media,
+        )
 
     return await bot.send_message(
         chat_id=chat_id,
@@ -429,24 +445,43 @@ async def edit_post_in_chat(
     message_id: int,
     text: str,
     entities_json: Optional[str],
-    photo_url: str,
+    photo_url: str = "",
     show_above_text: bool = True,
     prefer_large_media: bool = True,
     buttons: Optional[List[Dict[str, Any]]] = None,
     workspace_id: Optional[int] = None,
     post_id: Optional[int] = None,
+    media_type: str = "link",
+    photo_file_id: str = "",
 ) -> Any:
     entities = deserialize_entities(entities_json)
-    preview = build_link_preview_options(
-        photo_url=photo_url,
-        show_above_text=show_above_text,
-        prefer_large_media=prefer_large_media,
-    )
     markup = build_buttons_markup(
         buttons,
         workspace_id=workspace_id,
         post_id=post_id,
     )
+
+    if media_type == "photo" and photo_file_id:
+        media = InputMediaPhoto(
+            media=photo_file_id,
+            caption=text,
+            caption_entities=entities,
+        )
+        return await bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=media,
+            reply_markup=markup,
+        )
+
+    if media_type == "none" or not photo_url:
+        preview = LinkPreviewOptions(is_disabled=True)
+    else:
+        preview = build_link_preview_options(
+            photo_url=photo_url,
+            show_above_text=show_above_text,
+            prefer_large_media=prefer_large_media,
+        )
 
     return await bot.edit_message_text(
         chat_id=chat_id,
