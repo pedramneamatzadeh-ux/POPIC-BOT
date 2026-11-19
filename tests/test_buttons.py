@@ -119,7 +119,11 @@ class ButtonTests(unittest.TestCase):
 
         pv_kb = post_preview_controls_keyboard(True, True, 0)
         self.assertEqual(pv_kb.inline_keyboard[0][0].style, "success")
-        self.assertEqual(pv_kb.inline_keyboard[0][1].style, "success")
+        self.assertEqual(pv_kb.inline_keyboard[0][1].style, "primary")
+        self.assertEqual(pv_kb.inline_keyboard[0][1].callback_data, "pb:targets")
+        self.assertEqual(pv_kb.inline_keyboard[0][1].text, "🎯 انتخاب مقصد")
+        pv_texts = [b.text for row in pv_kb.inline_keyboard for b in row]
+        self.assertIn("🔘 دکمه شیشه‌ای (اختیاری)", pv_texts)
         self.assertEqual(pv_kb.inline_keyboard[-1][1].style, "danger")
 
         pv_none_kb = post_preview_controls_keyboard(True, True, 0, media_type="none")
@@ -149,8 +153,10 @@ class ButtonTests(unittest.TestCase):
 
         pm_none_kb = post_manage_detail_keyboard({"id": 8, "media_type": "none"}, buttons_count=0)
         pm_none_cbs = [b.callback_data for row in pm_none_kb.inline_keyboard for b in row]
+        pm_none_texts = [b.text for row in pm_none_kb.inline_keyboard for b in row]
         self.assertNotIn("pm:toggle_pos:8", pm_none_cbs)
         self.assertIn("pm:media_menu:8", pm_none_cbs)
+        self.assertIn("🔘 دکمه شیشه‌ای (اختیاری)", pm_none_texts)
 
         btns_kb = post_buttons_manage_keyboard(
             [

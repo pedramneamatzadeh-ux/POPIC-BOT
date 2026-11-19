@@ -197,6 +197,13 @@ def _detail_text(
             )
             lines.append(f"   - {ch_name}" + (f" ({html.escape(link)})" if link else ""))
 
+    lines.extend(
+        [
+            "",
+            "⚠️ توجه: «📤 ارسال به کانال/گروه» پست را همین لحظه ارسال می‌کند؛ اگر پست زمان‌بندی شده، فقط زمان و مقصد را در «⏰ زمان‌بندی پست» تنظیم کنید.",
+        ]
+    )
+
     return "\n".join(lines)
 
 

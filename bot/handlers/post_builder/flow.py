@@ -50,6 +50,7 @@ from ...keyboards import (
     post_channels_keyboard,
     post_media_choice_keyboard,
     post_preview_controls_keyboard,
+    post_target_picker_keyboard,
 )
 from ..schedule_ui import (
     handle_schedule_callback,
@@ -114,6 +115,19 @@ def _extract_button_url(message) -> str | None:
         elif raw_text.lower().startswith(("http://", "https://")):
             url = raw_text
     return url
+
+
+def _sync_pb_target_names(pb: Dict[str, Any], channels: List[Dict[str, Any]]) -> None:
+    id_set = {int(x) for x in (pb.get("target_chat_ids") or [])}
+    names: List[str] = []
+    for ch in channels:
+        cid = int(ch["chat_id"])
+        if cid in id_set:
+            names.append(
+                ch.get("title")
+                or (f"@{ch['username']}" if ch.get("username") else str(cid))
+            )
+    pb["target_chat_names"] = names
 
 
 def _ensure_post_saved(ws_db: Any, pb: Dict[str, Any], user_id: int) -> int:
@@ -396,6 +410,8 @@ async def receive_post_text(
         "preview_msg_id": None,
         "ctrl_msg_id": None,
         "scheduled_at": None,
+        "target_chat_ids": [],
+        "target_chat_names": [],
     }
 
     await close_question_message(
@@ -848,10 +864,87 @@ async def handle_preview_callback(
         )
         return POST_MEDIA_CHOICE
 
+    if data == "pb:targets":
+        channels = ws_db.get_target_channels()
+        if not channels:
+            await query.answer(Msg.NO_CHANNELS_CONFIGURED, show_alert=True)
+            return POST_PREVIEW
+
+        pb["_targets_backup"] = list(pb.get("target_chat_ids") or [])
+        if not pb.get("target_chat_ids") and len(channels) == 1:
+            pb["target_chat_ids"] = [int(channels[0]["chat_id"])]
+            _sync_pb_target_names(pb, channels)
+        await query.answer()
+        await query.edit_message_text(
+            "🎯 کانال‌ها یا گروه‌های مقصد را برای این پست انتخاب کن (برای زمان‌بندی کافیست مقصد را انتخاب کرده و سپس دکمهٔ ذخیره را بزنی):",
+            reply_markup=post_target_picker_keyboard(
+                channels,
+                pb.get("target_chat_ids") or [],
+                prefix="pb",
+                back_callback="pb:back_preview",
+            ),
+        )
+        return POST_SELECT_CHANNEL
+
+    if data.startswith("pb:tg_toggle:"):
+        raw = data.split(":", 2)[2]
+        if not raw.lstrip("-").isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_SELECT_CHANNEL
+        cid = int(raw)
+        channels = ws_db.get_target_channels()
+        selected = [int(x) for x in (pb.get("target_chat_ids") or [])]
+        if cid in selected:
+            selected.remove(cid)
+        else:
+            selected.append(cid)
+        pb["target_chat_ids"] = selected
+        _sync_pb_target_names(pb, channels)
+        await query.answer()
+        await query.edit_message_text(
+            "🎯 کانال‌ها یا گروه‌های مقصد را برای این پست انتخاب کن (برای زمان‌بندی کافیست مقصد را انتخاب کرده و سپس دکمهٔ ذخیره را بزنی):",
+            reply_markup=post_target_picker_keyboard(
+                channels,
+                selected,
+                prefix="pb",
+                back_callback="pb:back_preview",
+            ),
+        )
+        return POST_SELECT_CHANNEL
+
+    if data == "pb:tg_done":
+        selected = [int(x) for x in (pb.get("target_chat_ids") or [])]
+        if pb.get("scheduled_at") and not selected:
+            await query.answer(
+                "⚠️ برای پست زمان‌بندی‌شده حداقل یک مقصد باید انتخاب شود!",
+                show_alert=True,
+            )
+            return POST_SELECT_CHANNEL
+        pb.pop("_targets_backup", None)
+        channels = ws_db.get_target_channels()
+        _sync_pb_target_names(pb, channels)
+        if isinstance(pb.get("_sched"), dict):
+            pb["_sched"]["targets"] = list(selected)
+        if pb.get("post_id") and pb.get("scheduled_at") and selected:
+            ws_db.set_post_schedule(pb["post_id"], pb["scheduled_at"], selected)
+        await query.answer("✅ مقصدهای پست ثبت شدند.")
+        await query.edit_message_text(
+            build_control_summary(pb),
+            reply_markup=post_preview_controls_keyboard(
+                show_above_text=pb["show_above_text"],
+                prefer_large_media=pb["prefer_large_media"],
+                extra_buttons_count=len(pb.get("buttons") or []),
+                media_type=pb.get("media_type") or "link",
+            ),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return POST_PREVIEW
+
     if data == "pb:sched":
         await query.answer()
         existing_utc = pb.get("scheduled_at")
-        existing_targets = []
+        existing_targets = list(pb.get("target_chat_ids") or [])
         if pb.get("post_id"):
             saved = ws_db.get_post(pb["post_id"])
             if saved and saved.get("schedule_status") == "pending":
@@ -859,9 +952,11 @@ async def handle_preview_callback(
                 import json
 
                 try:
-                    existing_targets = json.loads(saved.get("scheduled_chat_ids") or "[]")
+                    db_targets = json.loads(saved.get("scheduled_chat_ids") or "[]")
+                    if db_targets:
+                        existing_targets = db_targets
                 except Exception:
-                    existing_targets = []
+                    pass
         pb["_sched"] = init_schedule_state(existing_utc, existing_targets)
         pb["ctrl_msg_id"] = ctrl_mid
         await render_schedule_panel(
@@ -1067,6 +1162,9 @@ async def handle_preview_callback(
         return POST_PREVIEW
 
     if data == "pb:back_preview":
+        if "_targets_backup" in pb:
+            pb["target_chat_ids"] = pb.pop("_targets_backup")
+            _sync_pb_target_names(pb, ws_db.get_target_channels())
         await query.answer()
         await query.edit_message_text(
             build_control_summary(pb),
@@ -1082,10 +1180,18 @@ async def handle_preview_callback(
         return POST_PREVIEW
 
     if data == "pb:done":
-        _ensure_post_saved(ws_db, pb, user_id)
+        post_id = _ensure_post_saved(ws_db, pb, user_id)
+        if pb.get("scheduled_at") and pb.get("target_chat_ids"):
+            ws_db.set_post_schedule(post_id, pb["scheduled_at"], pb["target_chat_ids"])
+        await sync_preview_buttons(context, chat_id, pb)
         await query.answer()
+        done_msg = (
+            "✅ پست ذخیره و زمان‌بندی شد! در زمان تعیین‌شده به‌صورت خودکار به مقصد(ها) ارسال می‌شود و نسخهٔ پیش‌نمایش در پی‌وی باقی ماند."
+            if pb.get("scheduled_at")
+            else Msg.POST_DONE
+        )
         try:
-            await query.edit_message_text(Msg.POST_DONE)
+            await query.edit_message_text(done_msg)
         except TelegramError:
             pass
         await go_to_main_menu(context, chat_id, user_id=user_id)
@@ -1410,6 +1516,8 @@ async def handle_pb_schedule_callback(
         post_id = _ensure_post_saved(ws_db, pb, user_id)
         ws_db.set_post_schedule(post_id, utc_str, chat_ids)
         pb["scheduled_at"] = utc_str
+        pb["target_chat_ids"] = list(chat_ids)
+        _sync_pb_target_names(pb, ws_db.get_target_channels())
         sched["has_existing"] = True
         sched["targets"] = list(chat_ids)
         await sync_preview_buttons(context, chat_id, pb)
