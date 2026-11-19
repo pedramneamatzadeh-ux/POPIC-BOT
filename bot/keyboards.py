@@ -568,32 +568,7 @@ def post_manage_list_keyboard(
     sched_count: Optional[int] = None,
     search_query: str = "",
 ) -> InlineKeyboardMarkup:
-    all_lbl = f"📋 همه ({all_count})" if all_count is not None else "📋 همه پست‌ها"
-    sched_lbl = (
-        f"⏰ زمان‌بندی‌شده ({sched_count})"
-        if sched_count is not None
-        else "⏰ زمان‌بندی‌شده"
-    )
-    rows: List[List[InlineKeyboardButton]] = [
-        [
-            ib(
-                f"{'✓ ' if tab == 'all' else ''}{all_lbl}",
-                callback_data="pm:tab:all",
-                style="success" if tab == "all" else "primary",
-            ),
-            ib(
-                f"{'✓ ' if tab == 'sched' else ''}{sched_lbl}",
-                callback_data="pm:tab:sched",
-                style="success" if tab == "sched" else "primary",
-            ),
-        ],
-    ]
-    search_row = [ib("🔍 جست‌وجو", callback_data="pm:search", style="primary")]
-    if search_query:
-        search_row.append(
-            ib("❌ پاک کردن جست‌وجو", callback_data="pm:search_clear", style="danger")
-        )
-    rows.append(search_row)
+    rows: List[List[InlineKeyboardButton]] = []
 
     for idx, post in enumerate(posts):
         num = offset + idx + 1
@@ -638,6 +613,34 @@ def post_manage_list_keyboard(
                 next_callback=f"pm:page:{page + 1}",
             )
         )
+
+    all_lbl = f"📋 همه ({all_count})" if all_count is not None else "📋 همه پست‌ها"
+    sched_lbl = (
+        f"⏰ زمان‌بندی‌شده ({sched_count})"
+        if sched_count is not None
+        else "⏰ زمان‌بندی‌شده"
+    )
+    rows.append(
+        [
+            ib(
+                f"{'✓ ' if tab == 'all' else ''}{all_lbl}",
+                callback_data="pm:tab:all",
+                style="success" if tab == "all" else "primary",
+            ),
+            ib(
+                f"{'✓ ' if tab == 'sched' else ''}{sched_lbl}",
+                callback_data="pm:tab:sched",
+                style="success" if tab == "sched" else "primary",
+            ),
+        ]
+    )
+
+    search_row = [ib("🔍 جست‌وجو", callback_data="pm:search", style="primary")]
+    if search_query:
+        search_row.append(
+            ib("❌ پاک کردن جست‌وجو", callback_data="pm:search_clear", style="danger")
+        )
+    rows.append(search_row)
 
     rows.append([ib("🏠 منوی اصلی", callback_data="pm:close", style="danger")])
     return InlineKeyboardMarkup(rows)

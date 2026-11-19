@@ -858,6 +858,70 @@ class V050Tests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_r17_saved_posts_five_per_page_bottom_controls_and_daily_unlimited(self) -> None:
+        self.assertEqual(config.PAGE_SIZE, 5)
+
+        async def run():
+            bot = _V050FakeBot()
+            ctx = _ctx(bot)
+            ws_db = get_workspace_db(7200)
+            ws_db.add_target_channel(-100720, "Ch 720", "ch720", 7200)
+
+            # Create 5 posts on 2099-12-23 (Tehran) and 6 posts on 2099-12-25 (Tehran) = 11 total
+            # 12:00 Tehran = 08:30 UTC
+            for i in range(5):
+                pid = ws_db.create_post(f"روز۲۳ پست {i+1}", "[]", "", 7200, media_type="none", title=f"D23-{i+1}")
+                ws_db.set_post_schedule(pid, f"2099-12-23 0{8}:{10+i}:00", [-100720])
+            for i in range(6):
+                pid = ws_db.create_post(f"روز۲۵ پست {i+1}", "[]", "", 7200, media_type="none", title=f"D25-{i+1}")
+                ws_db.set_post_schedule(pid, f"2099-12-25 0{8}:{10+i}:00", [-100720])
+
+            # 1) "All" tab shows max 5 posts per page, with tabs & search BELOW posts/pagination
+            await start_post_manage(
+                _upd(7200, 7200, message=_msg(bot, 7200, 7200, "📂 پست‌های ذخیره‌شده")),
+                ctx,
+            )
+            pm_mid = ctx.user_data["pm"]["msg_id"]
+            kb_all_p0 = bot.sent_messages[-1]["reply_markup"].inline_keyboard
+            post_rows_p0 = [r for r in kb_all_p0 if r[0].callback_data.startswith("pm:detail:")]
+            self.assertEqual(len(post_rows_p0), 5)
+            self.assertIn("صفحه 1 از 3", bot.sent_messages[-1]["text"])
+
+            # Verify bottom ordering: first 5 rows are posts, then pagination, then tabs, then search, then home
+            self.assertTrue(all(kb_all_p0[i][0].callback_data.startswith("pm:detail:") for i in range(5)))
+            self.assertTrue(any(b.callback_data.startswith("pm:page:") for b in kb_all_p0[5]))
+            self.assertEqual([b.callback_data for b in kb_all_p0[6]], ["pm:tab:all", "pm:tab:sched"])
+            self.assertEqual([b.callback_data for b in kb_all_p0[7]], ["pm:search"])
+            self.assertEqual([b.callback_data for b in kb_all_p0[8]], ["pm:close"])
+
+            # 2) "Scheduled" tab shows 1 day per page WITHOUT the 5-post limit:
+            # Page 0 -> 2099-12-23 (5 posts); Page 1 -> 2099-12-25 (all 6 posts on 1 page!)
+            await handle_post_manage_callback(
+                _upd(7200, 7200, callback_query=_query(bot, 7200, 7200, pm_mid, "pm:tab:sched")),
+                ctx,
+            )
+            kb_s0 = bot.edited_messages[-1]["reply_markup"].inline_keyboard
+            s0_posts = [r for r in kb_s0 if r[0].callback_data.startswith("pm:detail:")]
+            self.assertEqual(len(s0_posts), 5)
+            self.assertIn("2099-12-23", bot.edited_messages[-1]["text"])
+            self.assertIn("صفحه 1 از 2", bot.edited_messages[-1]["text"])
+
+            await handle_post_manage_callback(
+                _upd(7200, 7200, callback_query=_query(bot, 7200, 7200, pm_mid, "pm:page:1")),
+                ctx,
+            )
+            kb_s1 = bot.edited_messages[-1]["reply_markup"].inline_keyboard
+            s1_posts = [r for r in kb_s1 if r[0].callback_data.startswith("pm:detail:")]
+            self.assertEqual(len(s1_posts), 6)
+            self.assertIn("2099-12-25", bot.edited_messages[-1]["text"])
+            self.assertIn("صفحه 2 از 2", bot.edited_messages[-1]["text"])
+            # Tabs and search remain below the 6 daily posts + pagination
+            self.assertEqual([b.callback_data for b in kb_s1[-3]], ["pm:tab:all", "pm:tab:sched"])
+            self.assertEqual([b.callback_data for b in kb_s1[-2]], ["pm:search"])
+            self.assertEqual([b.callback_data for b in kb_s1[-1]], ["pm:close"])
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()
