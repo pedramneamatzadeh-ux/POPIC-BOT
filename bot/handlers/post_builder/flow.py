@@ -16,6 +16,7 @@ from ...constants import (
     MAX_EXTRA_BUTTONS,
     MAX_POPUP_TEXT_LENGTH,
     MAX_POST_TEXT_LENGTH,
+    MAX_POST_TITLE_LENGTH,
     POST_ADD_BTN_TEXT,
     POST_ADD_BTN_URL,
     POST_BTN_EDIT_TEXT,
@@ -26,13 +27,20 @@ from ...constants import (
     POST_PHOTO_LINK,
     POST_PHOTO_UPLOAD,
     POST_PREVIEW,
+    POST_SCHED_DAY,
+    POST_SCHED_PANEL,
+    POST_SCHED_TARGET,
+    POST_SCHED_TIME,
+    POST_SCHED_YEAR,
     POST_SELECT_CHANNEL,
     POST_TEXT,
+    POST_TITLE,
     Msg,
 )
 from ...decorators import workspace_access
 from ...keyboards import (
     POST_CANCEL_INLINE,
+    POST_TITLE_INLINE,
     input_back_keyboard,
     main_menu_for,
     post_button_inspector_keyboard,
@@ -42,6 +50,14 @@ from ...keyboards import (
     post_channels_keyboard,
     post_media_choice_keyboard,
     post_preview_controls_keyboard,
+)
+from ..schedule_ui import (
+    handle_schedule_callback,
+    handle_schedule_day_input,
+    handle_schedule_time_input,
+    handle_schedule_year_input,
+    init_schedule_state,
+    render_schedule_panel,
 )
 from ...services.button_ui import (
     build_button_inspector_text,
@@ -119,11 +135,13 @@ def _ensure_post_saved(ws_db: Any, pb: Dict[str, Any], user_id: int) -> int:
             buttons_json=buttons_json,
             media_type=media_type,
             photo_file_id=photo_file_id,
+            title=pb.get("title") or "",
         )
         pb["post_id"] = post_id
     else:
         ws_db.update_post(
             post_id,
+            title=pb.get("title") or "",
             post_text=pb["text"],
             entities_json=pb["entities_json"],
             media_type=media_type,
@@ -281,11 +299,56 @@ async def start_post_builder(
     )
 
     sent = await update.message.reply_text(
+        Msg.POST_ASK_TITLE,
+        reply_markup=POST_TITLE_INLINE,
+    )
+    register_panel_message(context, sent.message_id)
+    set_question_message(context, sent.message_id)
+    return POST_TITLE
+
+
+@workspace_access
+async def receive_post_title(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    message = update.message
+    raw = " ".join((getattr(message, "text", None) or "").split())
+    if not raw or len(raw) > MAX_POST_TITLE_LENGTH:
+        sent = await message.reply_text(
+            Msg.POST_TITLE_INVALID,
+            reply_markup=POST_TITLE_INLINE,
+        )
+        register_panel_message(context, sent.message_id)
+        set_question_message(context, sent.message_id)
+        return POST_TITLE
+
+    context.user_data["pb_title"] = raw
+    await close_question_message(context, message.chat_id, f"نام پست: «{raw}»")
+
+    sent = await message.reply_text(
         Msg.POST_ASK_TEXT,
         reply_markup=POST_CANCEL_INLINE,
     )
     register_panel_message(context, sent.message_id)
     set_question_message(context, sent.message_id)
+    return POST_TEXT
+
+
+@workspace_access
+async def handle_skip_title_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["pb_title"] = ""
+    await query.edit_message_text(
+        Msg.POST_ASK_TEXT,
+        reply_markup=POST_CANCEL_INLINE,
+    )
+    if query.message:
+        set_question_message(context, query.message.message_id)
     return POST_TEXT
 
 
@@ -320,6 +383,7 @@ async def receive_post_text(
     entities_json = serialize_entities(message.entities)
     context.user_data["pb"] = {
         "ws_id": ws_id,
+        "title": context.user_data.pop("pb_title", "") or "",
         "text": text,
         "entities_json": entities_json,
         "media_type": "none",
@@ -331,6 +395,7 @@ async def receive_post_text(
         "post_id": None,
         "preview_msg_id": None,
         "ctrl_msg_id": None,
+        "scheduled_at": None,
     }
 
     await close_question_message(
@@ -609,6 +674,7 @@ async def _publish_to_channel(
         target_chat_id=channel["chat_id"],
         message_id=sent.message_id,
         sent_by=user_id,
+        media_type=pb.get("media_type") or "link",
     )
 
     link = build_telegram_message_link(
@@ -651,6 +717,7 @@ async def handle_preview_callback(
 
     if data == "pb:send_pv":
         post_id = _ensure_post_saved(ws_db, pb, user_id)
+        media_type = pb.get("media_type") or "link"
         if pb.get("preview_msg_id"):
             await sync_preview_buttons(context, chat_id, pb)
             ws_db.record_delivery(
@@ -659,6 +726,7 @@ async def handle_preview_callback(
                 target_chat_id=chat_id,
                 message_id=pb["preview_msg_id"],
                 sent_by=user_id,
+                media_type=media_type,
             )
         else:
             try:
@@ -673,7 +741,7 @@ async def handle_preview_callback(
                     buttons=pb.get("buttons") or [],
                     workspace_id=pb.get("ws_id"),
                     post_id=post_id,
-                    media_type=pb.get("media_type") or "link",
+                    media_type=media_type,
                     photo_file_id=pb.get("photo_file_id") or "",
                 )
                 ws_db.record_delivery(
@@ -682,6 +750,7 @@ async def handle_preview_callback(
                     target_chat_id=chat_id,
                     message_id=sent.message_id,
                     sent_by=user_id,
+                    media_type=media_type,
                 )
             except TelegramError as exc:
                 await query.answer(f"❌ ارسال ناموفق: {exc}", show_alert=True)
@@ -778,6 +847,33 @@ async def handle_preview_callback(
             reply_markup=post_media_choice_keyboard(back_callback="pb:back_preview"),
         )
         return POST_MEDIA_CHOICE
+
+    if data == "pb:sched":
+        await query.answer()
+        existing_utc = pb.get("scheduled_at")
+        existing_targets = []
+        if pb.get("post_id"):
+            saved = ws_db.get_post(pb["post_id"])
+            if saved and saved.get("schedule_status") == "pending":
+                existing_utc = saved.get("scheduled_at")
+                import json
+
+                try:
+                    existing_targets = json.loads(saved.get("scheduled_chat_ids") or "[]")
+                except Exception:
+                    existing_targets = []
+        pb["_sched"] = init_schedule_state(existing_utc, existing_targets)
+        pb["ctrl_msg_id"] = ctrl_mid
+        await render_schedule_panel(
+            context,
+            chat_id,
+            pb["_sched"],
+            prefix="pb",
+            back_callback="pb:back_preview",
+            message_id=ctrl_mid,
+            existing_utc_iso=existing_utc,
+        )
+        return POST_SCHED_PANEL
 
     if data == "pb:edit_text":
         await query.answer()
@@ -1268,3 +1364,138 @@ async def receive_btn_edit_value(
     await sync_preview_buttons(context, message.chat_id, pb)
     await _show_button_inspector(context, message.chat_id, pb, idx)
     return POST_PREVIEW
+
+
+_PB_SCHED_STATES = {
+    "panel": POST_SCHED_PANEL,
+    "day": POST_SCHED_DAY,
+    "year": POST_SCHED_YEAR,
+    "time": POST_SCHED_TIME,
+    "target": POST_SCHED_TARGET,
+}
+
+
+@workspace_access
+async def handle_pb_schedule_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user_id = update.effective_user.id
+    ws_db = context.user_data["_ws_db"]
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    if not pb:
+        await query.answer("🚫 نشست ساخت پست منقضی شده است.", show_alert=True)
+        return ConversationHandler.END
+
+    chat_id = query.message.chat_id if query.message else user_id
+    ctrl_mid = query.message.message_id if query.message else pb.get("ctrl_msg_id")
+    sched = pb.setdefault("_sched", init_schedule_state(pb.get("scheduled_at")))
+
+    async def _back_to_preview() -> int:
+        await query.edit_message_text(
+            build_control_summary(pb),
+            reply_markup=post_preview_controls_keyboard(
+                show_above_text=pb["show_above_text"],
+                prefer_large_media=pb["prefer_large_media"],
+                extra_buttons_count=len(pb.get("buttons") or []),
+                media_type=pb.get("media_type") or "link",
+            ),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return POST_PREVIEW
+
+    async def _on_save(utc_str: str, chat_ids: List[int]) -> int:
+        post_id = _ensure_post_saved(ws_db, pb, user_id)
+        ws_db.set_post_schedule(post_id, utc_str, chat_ids)
+        pb["scheduled_at"] = utc_str
+        sched["has_existing"] = True
+        sched["targets"] = list(chat_ids)
+        await sync_preview_buttons(context, chat_id, pb)
+        return await _back_to_preview()
+
+    async def _on_clear() -> int:
+        if pb.get("post_id"):
+            ws_db.clear_post_schedule(pb["post_id"])
+        pb["scheduled_at"] = None
+        sched["has_existing"] = False
+        return await _back_to_preview()
+
+    return await handle_schedule_callback(
+        context=context,
+        query=query,
+        ws_db=ws_db,
+        chat_id=chat_id,
+        msg_id=ctrl_mid,
+        data=(query.data or "").strip(),
+        prefix="pb",
+        sched=sched,
+        states=_PB_SCHED_STATES,
+        back_callback="pb:back_preview",
+        existing_utc_iso=pb.get("scheduled_at"),
+        on_save=_on_save,
+        on_clear=_on_clear,
+        on_back=_back_to_preview,
+    )
+
+
+@workspace_access
+async def receive_pb_sched_day(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    if not pb or "_sched" not in pb:
+        return ConversationHandler.END
+    return await handle_schedule_day_input(
+        update=update,
+        context=context,
+        sched=pb["_sched"],
+        prefix="pb",
+        panel_msg_id=pb.get("ctrl_msg_id"),
+        back_callback="pb:back_preview",
+        states=_PB_SCHED_STATES,
+        existing_utc_iso=pb.get("scheduled_at"),
+    )
+
+
+@workspace_access
+async def receive_pb_sched_year(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    if not pb or "_sched" not in pb:
+        return ConversationHandler.END
+    return await handle_schedule_year_input(
+        update=update,
+        context=context,
+        sched=pb["_sched"],
+        prefix="pb",
+        panel_msg_id=pb.get("ctrl_msg_id"),
+        back_callback="pb:back_preview",
+        states=_PB_SCHED_STATES,
+        existing_utc_iso=pb.get("scheduled_at"),
+    )
+
+
+@workspace_access
+async def receive_pb_sched_time(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    pb: Dict[str, Any] = context.user_data.get("pb") or {}
+    if not pb or "_sched" not in pb:
+        return ConversationHandler.END
+    return await handle_schedule_time_input(
+        update=update,
+        context=context,
+        sched=pb["_sched"],
+        prefix="pb",
+        panel_msg_id=pb.get("ctrl_msg_id"),
+        back_callback="pb:back_preview",
+        states=_PB_SCHED_STATES,
+        existing_utc_iso=pb.get("scheduled_at"),
+    )
+

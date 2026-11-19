@@ -10,19 +10,21 @@ class ChannelsMixin:
         title: str = "",
         username: str = "",
         added_by: Optional[int] = None,
+        chat_type: str = "channel",
     ) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO target_channels (
-                    chat_id, title, username, added_by
+                    chat_id, title, username, chat_type, added_by
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     title = excluded.title,
-                    username = excluded.username
+                    username = excluded.username,
+                    chat_type = excluded.chat_type
                 """,
-                (int(chat_id), title or "", username or "", added_by),
+                (int(chat_id), title or "", username or "", chat_type or "channel", added_by),
             )
             return int(cursor.lastrowid)
 

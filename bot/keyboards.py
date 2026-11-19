@@ -8,7 +8,7 @@ from telegram import (
 )
 
 from .config import config
-from .constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON
+from .constants import OLD_EDIT_BUTTON, SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON
 from .database import registry, resolve_user_workspace
 from .services.publisher import (
     STYLE_ICONS,
@@ -16,6 +16,7 @@ from .services.publisher import (
     group_buttons_by_row,
     normalize_buttons,
 )
+from .services.scheduler import GREGORIAN_MONTHS_FA, month_name_fa
 
 # ---------------------------------------------------------------------------
 # رنگ دکمه‌ها (Bot API 9.4 — style: primary/success/danger)
@@ -61,6 +62,7 @@ def ib_exact(
 MAIN_MENU_STYLES = {
     "📝 ساخت پست جدید": "success",
     "📂 پست‌های ذخیره‌شده": "primary",
+    OLD_EDIT_BUTTON: "primary",
     "📊 آمار": "primary",
     SWITCH_WORKSPACE_BUTTON: "primary",
     SETTINGS_BUTTON: "danger",
@@ -82,26 +84,24 @@ def build_main_menu(
 ) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = [
         ["📝 ساخت پست جدید", "📂 پست‌های ذخیره‌شده"],
+        [OLD_EDIT_BUTTON, "📊 آمار"],
     ]
 
     if is_owner:
+        last_row = [SETTINGS_BUTTON]
         if is_env_owner:
-            rows.append(["📊 آمار", "💾 بک‌آپ"])
-            last_row = [SETTINGS_BUTTON]
-            if has_admin_roles:
-                last_row.append(SWITCH_WORKSPACE_BUTTON)
-            rows.append(last_row)
-        else:
-            rows.append(["📊 آمار", SETTINGS_BUTTON])
-            if has_admin_roles:
-                rows.append([SWITCH_WORKSPACE_BUTTON])
-    else:
-        row2 = ["📊 آمار"]
-        if is_env_owner:
-            row2.append("💾 بک‌آپ")
+            last_row.append("💾 بک‌آپ")
         if has_admin_roles:
-            row2.append(SWITCH_WORKSPACE_BUTTON)
-        rows.append(row2)
+            last_row.append(SWITCH_WORKSPACE_BUTTON)
+        rows.append(last_row)
+    else:
+        last_row = []
+        if is_env_owner:
+            last_row.append("💾 بک‌آپ")
+        if has_admin_roles:
+            last_row.append(SWITCH_WORKSPACE_BUTTON)
+        if last_row:
+            rows.append(last_row)
 
     return ReplyKeyboardMarkup(
         [_menu_row(r) for r in rows],
@@ -160,6 +160,13 @@ def workspace_choice_keyboard(
 # ---------------------------------------------------------------------------
 # دکمه‌های لغو اینلاین + تأیید لغو
 # ---------------------------------------------------------------------------
+
+POST_TITLE_INLINE = InlineKeyboardMarkup(
+    [
+        [ib("⏭ رد شدن (بدون نام)", callback_data="pb:skip_title", style="primary")],
+        [ib("❌ لغو ساخت پست", callback_data="cancel_prompt", style="danger")],
+    ]
+)
 
 POST_CANCEL_INLINE = InlineKeyboardMarkup(
     [[ib("❌ لغو ساخت پست", callback_data="cancel_prompt", style="danger")]]
@@ -274,6 +281,7 @@ def post_preview_controls_keyboard(
         [
             [
                 ib(btns_label, callback_data="pb:btns", style="primary"),
+                ib("⏰ زمان‌بندی پست", callback_data="pb:sched", style="primary"),
             ],
             [
                 ib("✏️ ویرایش متن", callback_data="pb:edit_text", style="primary"),
@@ -288,6 +296,10 @@ def post_preview_controls_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _chat_icon(chat_type: str) -> str:
+    return "👥" if chat_type in ("group", "supergroup") else "📢"
+
+
 def post_channels_keyboard(
     channels: List[Dict[str, Any]],
     callback_prefix: str,
@@ -298,16 +310,108 @@ def post_channels_keyboard(
         title = ch.get("title") or (
             f"@{ch['username']}" if ch.get("username") else str(ch["chat_id"])
         )
+        icon = _chat_icon(ch.get("chat_type") or "channel")
         rows.append(
             [
                 ib(
-                    f"📢 {title}",
+                    f"{icon} {title}",
                     callback_data=f"{callback_prefix}{ch['id']}",
                     style="primary",
                 )
             ]
         )
     rows.append([ib("◀️ بازگشت", callback_data=back_callback, style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# کیبوردهای زمان‌بندی پست (تاریخ میلادی + ساعت تهران)
+# ---------------------------------------------------------------------------
+
+def schedule_panel_keyboard(
+    draft: Dict[str, int],
+    prefix: str = "pb",
+    has_existing: bool = False,
+    back_callback: str = "pb:back_preview",
+) -> InlineKeyboardMarkup:
+    day = int(draft["day"])
+    month = int(draft["month"])
+    year = int(draft["year"])
+    hour = int(draft["hour"])
+    minute = int(draft["minute"])
+
+    rows = [
+        [
+            ib(f"📅 روز: {day:02d}", callback_data=f"{prefix}:sched_day", style="primary"),
+            ib(f"📆 ماه: {month_name_fa(month)}", callback_data=f"{prefix}:sched_month", style="primary"),
+        ],
+        [
+            ib(f"🗓 سال: {year}", callback_data=f"{prefix}:sched_year", style="primary"),
+            ib(f"🕒 ساعت (تهران): {hour:02d}:{minute:02d}", callback_data=f"{prefix}:sched_time", style="primary"),
+        ],
+        [
+            ib("✅ تأیید زمان و انتخاب مقصد", callback_data=f"{prefix}:sched_confirm", style="success"),
+        ],
+    ]
+    if has_existing:
+        rows.append(
+            [ib("🗑 لغو زمان‌بندی فعلی", callback_data=f"{prefix}:sched_clear", style="danger")]
+        )
+    rows.append([ib("◀️ بازگشت", callback_data=back_callback, style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def schedule_months_keyboard(
+    selected_month: int,
+    prefix: str = "pb",
+) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    cur_row: List[InlineKeyboardButton] = []
+    for num, name in GREGORIAN_MONTHS_FA:
+        mark = "✓ " if num == int(selected_month) else ""
+        cur_row.append(
+            ib(
+                f"{mark}{name}",
+                callback_data=f"{prefix}:sched_m:{num}",
+                style="success" if num == int(selected_month) else "primary",
+            )
+        )
+        if len(cur_row) == 3:
+            rows.append(cur_row)
+            cur_row = []
+    if cur_row:
+        rows.append(cur_row)
+    rows.append([ib("◀️ بازگشت", callback_data=f"{prefix}:sched_panel", style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def schedule_targets_keyboard(
+    channels: List[Dict[str, Any]],
+    selected_chat_ids: List[int],
+    prefix: str = "pb",
+) -> InlineKeyboardMarkup:
+    selected_set = {int(x) for x in selected_chat_ids}
+    rows: List[List[InlineKeyboardButton]] = []
+    for ch in channels:
+        cid = int(ch["chat_id"])
+        title = ch.get("title") or (
+            f"@{ch['username']}" if ch.get("username") else str(cid)
+        )
+        icon = _chat_icon(ch.get("chat_type") or "channel")
+        mark = "✅" if cid in selected_set else "⬜"
+        rows.append(
+            [
+                ib(
+                    f"{mark} {icon} {title}",
+                    callback_data=f"{prefix}:sched_tg:{cid}",
+                    style="success" if cid in selected_set else "primary",
+                )
+            ]
+        )
+    rows.append(
+        [ib("🚀 ثبت نهایی زمان‌بندی", callback_data=f"{prefix}:sched_save", style="success")]
+    )
+    rows.append([ib("◀️ بازگشت", callback_data=f"{prefix}:sched_panel", style="danger")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -427,18 +531,66 @@ def post_manage_list_keyboard(
     page: int,
     total_pages_count: int,
     offset: int,
+    *,
+    tab: str = "all",
+    all_count: Optional[int] = None,
+    sched_count: Optional[int] = None,
+    search_query: str = "",
 ) -> InlineKeyboardMarkup:
-    rows = []
+    all_lbl = f"📋 همه ({all_count})" if all_count is not None else "📋 همه پست‌ها"
+    sched_lbl = (
+        f"⏰ زمان‌بندی‌شده ({sched_count})"
+        if sched_count is not None
+        else "⏰ زمان‌بندی‌شده"
+    )
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            ib(
+                f"{'✓ ' if tab == 'all' else ''}{all_lbl}",
+                callback_data="pm:tab:all",
+                style="success" if tab == "all" else "primary",
+            ),
+            ib(
+                f"{'✓ ' if tab == 'sched' else ''}{sched_lbl}",
+                callback_data="pm:tab:sched",
+                style="success" if tab == "sched" else "primary",
+            ),
+        ],
+    ]
+    search_row = [ib("🔍 جست‌وجو", callback_data="pm:search", style="primary")]
+    if search_query:
+        search_row.append(
+            ib("❌ پاک کردن جست‌وجو", callback_data="pm:search_clear", style="danger")
+        )
+    rows.append(search_row)
+
     for idx, post in enumerate(posts):
         num = offset + idx + 1
-        snippet = " ".join((post.get("post_text") or "").split())
-        if len(snippet) > 28:
-            snippet = snippet[:28] + "…"
-        badge = "✅" if post.get("status") == "published" else "📝"
+        title = (post.get("title") or "").strip()
+        if title:
+            label_body = title if len(title) <= 26 else title[:26] + "…"
+        else:
+            snippet = " ".join((post.get("post_text") or "").split())
+            label_body = snippet if len(snippet) <= 26 else snippet[:26] + "…"
+
+        if post.get("schedule_status") == "pending":
+            badge = "⏰"
+        elif post.get("status") == "published":
+            badge = "✅"
+        else:
+            badge = "📝"
+
+        time_suffix = ""
+        if tab == "sched" and post.get("scheduled_at"):
+            from .services.scheduler import fmt_schedule_tehran
+
+            hhmm = fmt_schedule_tehran(post["scheduled_at"]).split("—")[-1].strip()
+            time_suffix = f" ({hhmm})"
+
         rows.append(
             [
                 ib(
-                    f"{num}. {badge} {snippet}",
+                    f"{num}. {badge} {label_body}{time_suffix}",
                     callback_data=f"pm:detail:{post['id']}",
                     style="primary",
                 )
@@ -463,6 +615,7 @@ def post_manage_list_keyboard(
 def post_manage_detail_keyboard(
     post: Dict[str, Any],
     buttons_count: int = 0,
+    published_count: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
     post_id = post["id"]
     btns_label = (
@@ -471,22 +624,26 @@ def post_manage_detail_keyboard(
         else "🔘 افزودن دکمه شیشه‌ای (اختیاری)"
     )
 
-    rows = [
-        [
-            ib("👁 ارسال پیش‌نمایش به پی‌وی", callback_data=f"pm:pv:{post_id}", style="success"),
-        ],
-        [
-            ib("📤 ارسال به کانال", callback_data=f"pm:send_ch:{post_id}", style="success"),
-        ],
+    has_published = (
+        (published_count is not None and published_count > 0)
+        or bool(post.get("target_channel_id") and post.get("channel_message_id"))
+    )
+
+    send_row = [
+        ib("📤 ارسال به کانال/گروه", callback_data=f"pm:send_ch:{post_id}", style="success"),
+        ib("📥 تحویل در پی‌وی", callback_data=f"pm:pv:{post_id}", style="success"),
     ]
 
-    if post.get("target_channel_id") and post.get("channel_message_id"):
-        rows[1].append(
-            ib(
-                "♻️ آپدیت در کانال",
-                callback_data=f"pm:update_ch:{post_id}",
-                style="primary",
-            )
+    rows: List[List[InlineKeyboardButton]] = [send_row]
+    if has_published:
+        rows.append(
+            [
+                ib(
+                    "♻️ آپدیت در کانال/گروه",
+                    callback_data=f"pm:update_ch:{post_id}",
+                    style="primary",
+                )
+            ]
         )
 
     media_type = post.get("media_type") or "link"
@@ -494,6 +651,7 @@ def post_manage_detail_keyboard(
         [
             [
                 ib(btns_label, callback_data=f"pm:btns:{post_id}", style="primary"),
+                ib("⏰ زمان‌بندی پست", callback_data=f"pm:sched:{post_id}", style="primary"),
             ],
             [
                 ib("✏️ ویرایش متن", callback_data=f"pm:edit_text:{post_id}", style="primary"),
@@ -525,6 +683,95 @@ def post_manage_detail_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def post_manage_update_targets_keyboard(
+    post_id: int,
+    targets: List[Dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for t in targets:
+        icon = _chat_icon(t.get("chat_type") or "channel")
+        title = t.get("title") or (
+            f"@{t['username']}" if t.get("username") else str(t["chat_id"])
+        )
+        rows.append(
+            [
+                ib(
+                    f"{icon} {title}",
+                    callback_data=f"pm:upd_pick:{post_id}:{t['chat_id']}",
+                    style="primary",
+                )
+            ]
+        )
+    if len(targets) > 1:
+        rows.append(
+            [
+                ib(
+                    f"♻️ آپدیت در همه ({len(targets)})",
+                    callback_data=f"pm:upd_all:{post_id}",
+                    style="success",
+                )
+            ]
+        )
+    rows.append([ib("◀️ بازگشت", callback_data=f"pm:detail:{post_id}", style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def confirm_action_keyboard(
+    yes_text: str,
+    yes_callback: str,
+    no_text: str = "❌ انصراف",
+    no_callback: str = "cancel",
+    yes_style: str = "danger",
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                ib(yes_text, callback_data=yes_callback, style=yes_style),
+                ib(no_text, callback_data=no_callback, style="primary"),
+            ]
+        ]
+    )
+
+
+def old_post_edit_panel_keyboard(
+    media_type: str = "none",
+    buttons_count: int = 0,
+) -> InlineKeyboardMarkup:
+    btns_lbl = (
+        f"🔘 دکمه‌های شیشه‌ای ({buttons_count})"
+        if buttons_count
+        else "🔘 افزودن دکمه شیشه‌ای"
+    )
+    rows = [
+        [
+            ib("✏️ ویرایش متن / کپشن", callback_data="old:edit_text", style="primary"),
+            ib("🖼 تغییر / حذف / لینک عکس", callback_data="old:media_menu", style="primary"),
+        ],
+        [
+            ib(btns_lbl, callback_data="old:btns", style="primary"),
+        ],
+    ]
+    if media_type == "link":
+        rows.append(
+            [
+                ib("⬆️/⬇️ جای پیش‌نمایش", callback_data="old:toggle_pos", style="primary"),
+                ib("🖼 اندازه پیش‌نمایش", callback_data="old:toggle_size", style="primary"),
+            ]
+        )
+    rows.extend(
+        [
+            [
+                ib("♻️ اعمال تغییرات روی پست کانال/گروه", callback_data="old:apply", style="success"),
+            ],
+            [
+                ib("🔄 انتخاب پست دیگر", callback_data="old:restart", style="primary"),
+                ib("🏠 منوی اصلی", callback_data="old:close", style="danger"),
+            ],
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 # ---------------------------------------------------------------------------
 # کیبوردهای پنل تنظیمات (فقط مالک فضای کاری)
 # ---------------------------------------------------------------------------
@@ -534,7 +781,7 @@ def settings_panel_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 ib("👨‍💼 ادمین‌ها", callback_data="st:admins"),
-                ib("📢 کانال‌های مقصد", callback_data="st:channels"),
+                ib("📢 کانال‌ها و گروه‌ها", callback_data="st:channels"),
             ],
             [
                 ib("🖼 تنظیمات پیش‌نمایش و دکمه", callback_data="st:preview"),
@@ -580,6 +827,7 @@ def settings_channels_keyboard(
     rows = []
     for ch in channels:
         id_text = str(ch["chat_id"])
+        icon = _chat_icon(ch.get("chat_type") or "channel")
         name_text = ch.get("title") or (
             f"@{ch['username']}" if ch.get("username") else "—"
         )
@@ -591,13 +839,13 @@ def settings_channels_keyboard(
                     callback_data=f"st:ch_del:{ch['id']}",
                 ),
                 ib(
-                    name_text,
+                    f"{icon} {name_text}",
                     style="primary",
                     callback_data=f"st:ch_del:{ch['id']}",
                 ),
             ]
         )
-    rows.append([ib("➕ افزودن کانال مقصد", callback_data="st:ch_add")])
+    rows.append([ib("➕ افزودن کانال یا گروه", callback_data="st:ch_add")])
     rows.append([ib("🔙 بازگشت", callback_data="st:panel")])
     return InlineKeyboardMarkup(rows)
 
@@ -642,12 +890,86 @@ def settings_input_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def stats_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def stats_keyboard(is_env_owner: bool = False) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if is_env_owner:
+        rows.append(
+            [ib("👥 مدیریت کاربران ربات", style="primary", callback_data="stats:users:0")]
+        )
+    rows.append(
         [
-            [
-                ib("🔄 به‌روزرسانی", style="primary", callback_data="stats:refresh"),
-                ib("🔙 بازگشت", callback_data="stats:close"),
-            ]
+            ib("🔄 به‌روزرسانی", style="primary", callback_data="stats:refresh"),
+            ib("🔙 بازگشت", callback_data="stats:close"),
         ]
     )
+    return InlineKeyboardMarkup(rows)
+
+
+def stats_users_keyboard(
+    users: List[Dict[str, Any]],
+    page: int,
+    total_pages_count: int,
+    env_owner_id: Optional[int] = None,
+) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for u in users:
+        uid = int(u["user_id"])
+        full = " ".join(
+            p for p in (u.get("first_name") or "", u.get("last_name") or "") if p
+        ).strip()
+        label = full or (f"@{u['username']}" if u.get("username") else str(uid))
+        if env_owner_id is not None and uid == int(env_owner_id):
+            icon = "👑"
+        elif u.get("is_banned"):
+            icon = "🚫"
+        else:
+            icon = "👤"
+        rows.append(
+            [
+                ib(
+                    f"{icon} {label} ({uid})",
+                    callback_data=f"stats:user:{uid}",
+                    style="danger" if u.get("is_banned") else "primary",
+                )
+            ]
+        )
+    if total_pages_count > 1 or users:
+        rows.append(
+            build_pagination_row(
+                page=page,
+                total_pages_count=total_pages_count,
+                previous_callback=f"stats:users:{page - 1}",
+                refresh_callback=f"stats:users:{page}",
+                next_callback=f"stats:users:{page + 1}",
+            )
+        )
+    rows.append([ib("◀️ بازگشت به آمار", callback_data="stats:refresh", style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def stats_user_detail_keyboard(
+    target_uid: int,
+    is_banned: bool,
+    is_env_owner: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            ib(
+                "✉️ ارسال پیام به کاربر",
+                callback_data=f"stats:msg_ask:{target_uid}",
+                style="success",
+            )
+        ],
+    ]
+    if not is_env_owner:
+        rows.append(
+            [
+                ib(
+                    "✅ رفع بن کاربر" if is_banned else "🚫 بن کردن کاربر",
+                    callback_data=f"stats:ban_ask:{target_uid}",
+                    style="success" if is_banned else "danger",
+                )
+            ]
+        )
+    rows.append([ib("◀️ بازگشت به فهرست کاربران", callback_data="stats:users:0", style="danger")])
+    return InlineKeyboardMarkup(rows)

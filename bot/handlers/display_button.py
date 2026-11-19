@@ -33,6 +33,20 @@ async def handle_display_button_callback(
             popup_text = buttons[idx].get("popup_text") or DEFAULT_POPUP_TEXT
     elif (
         len(parts) == 4
+        and parts[1] == "old"
+        and parts[2].isdigit()
+        and parts[3].isdigit()
+    ):
+        ws_id = int(parts[2])
+        popup_id = int(parts[3])
+        try:
+            saved = get_workspace_db(ws_id).get_old_popup(popup_id)
+            if saved:
+                popup_text = saved
+        except Exception:
+            logger.debug("خطا در خواندن متن دکمه نمایشی قدیمی", exc_info=True)
+    elif (
+        len(parts) == 4
         and parts[1].isdigit()
         and parts[2].isdigit()
         and parts[3].isdigit()

@@ -293,22 +293,83 @@ def forwarded_user_id(message: Any) -> Optional[int]:
     return None
 
 
-def resolve_chat_target(message: Any):
-    origin = getattr(message, "forward_origin", None)
-    if origin is not None:
-        chat = getattr(origin, "chat", None)
-        if chat is not None:
-            return chat.id
+def resolve_chat_target(message: Any, fallback_message: Any = None):
+    if isinstance(message, str) and fallback_message is None:
+        raw_text = message
+        msg_obj = None
+    else:
+        msg_obj = fallback_message if fallback_message is not None else message
+        origin = getattr(msg_obj, "forward_origin", None)
+        if origin is not None:
+            chat = getattr(origin, "chat", None)
+            if chat is not None:
+                return chat.id
+            sender_chat = getattr(origin, "sender_chat", None)
+            if sender_chat is not None:
+                return sender_chat.id
 
-    if getattr(message, "forward_from_chat", None) is not None:
-        return message.forward_from_chat.id
+        if getattr(msg_obj, "forward_from_chat", None) is not None:
+            return msg_obj.forward_from_chat.id
 
-    text = normalize_digits((getattr(message, "text", None) or "").strip())
+        raw_text = getattr(msg_obj, "text", None) or (
+            message if isinstance(message, str) else ""
+        )
+
+    text = normalize_digits((raw_text or "").strip())
     if text.startswith("@") and len(text) > 1:
         return text
+    m_link = re.fullmatch(
+        r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,})/?",
+        text,
+        re.I,
+    )
+    if m_link:
+        return f"@{m_link.group(1)}"
     if re.fullmatch(r"-?\d+", text):
         return int(text)
     return None
+
+
+_PUBLIC_MSG_LINK_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,})/(\d+)(?:\?.*)?$",
+    re.I,
+)
+_PRIVATE_MSG_LINK_RE = re.compile(
+    r"^(?:https?://)?(?:t\.me|telegram\.me)/c/(\d+)/(\d+)(?:\?.*)?$",
+    re.I,
+)
+
+
+def parse_telegram_message_link(raw: Optional[str]) -> Tuple[Any, Optional[int]]:
+    """پارس لینک پیام عمومی یا خصوصی تلگرام؛ خروجی: (chat_target, message_id)."""
+    text = (raw or "").strip()
+    if not text:
+        return None, None
+    m_priv = _PRIVATE_MSG_LINK_RE.match(text)
+    if m_priv:
+        return int(f"-100{m_priv.group(1)}"), int(m_priv.group(2))
+    m_pub = _PUBLIC_MSG_LINK_RE.match(text)
+    if m_pub:
+        uname = m_pub.group(1)
+        if uname.lower() in ("c", "s", "addstickers", "joinchat", "boost"):
+            return None, None
+        return f"@{uname}", int(m_pub.group(2))
+    return None, None
+
+
+def extract_forwarded_message_target(message: Any) -> Tuple[Optional[int], Optional[int]]:
+    """استخراج (chat_id, message_id) از پیام فورواردشده از کانال یا سوپرگروه."""
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        msg_id = getattr(origin, "message_id", None)
+        chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+        if chat is not None and msg_id:
+            return int(chat.id), int(msg_id)
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    fwd_mid = getattr(message, "forward_from_message_id", None)
+    if fwd_chat is not None and fwd_mid:
+        return int(fwd_chat.id), int(fwd_mid)
+    return None, None
 
 
 async def precheck_chat(

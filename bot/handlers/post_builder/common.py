@@ -8,6 +8,7 @@ from telegram.error import TelegramError
 
 from ...keyboards import post_preview_controls_keyboard
 from ...services.publisher import build_buttons_markup, send_post_to_chat
+from ...services.scheduler import fmt_schedule_tehran
 from ...utils import PANEL_MSG_KEY, register_panel_message
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,8 @@ def build_control_summary(pb: Dict[str, Any]) -> str:
         "🎛 <b>کنترل و انتشار پیش‌نمایش</b>",
         f"• طول متن: {text_len} / {max_len} کاراکتر",
     ]
+    if pb.get("title"):
+        lines.insert(1, f"• نام پست: <b>{html.escape(pb['title'])}</b>")
     if media_type == "none":
         lines.append("• وضعیت تصویر: بدون عکس")
     elif media_type == "photo":
@@ -95,6 +98,9 @@ def build_control_summary(pb: Dict[str, Any]) -> str:
         size = "بزرگ 🖼" if pb["prefer_large_media"] else "کوچک 🖼"
         lines.append(f"• لینک عکس: {html.escape(pb.get('photo_url') or '')}")
         lines.append(f"• نمایش عکس: {pos} | اندازه: {size}")
+
+    if pb.get("scheduled_at"):
+        lines.append(f"• ⏰ زمان‌بندی: <b>{html.escape(fmt_schedule_tehran(pb['scheduled_at']))}</b>")
 
     if btns_count:
         lines.append(f"• دکمه‌های شیشه‌ای: {btns_count}")

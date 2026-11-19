@@ -228,7 +228,7 @@ async def _dispatch_settings(context, query, owner_id: int):
         label = ch.get("title") or str(ch["chat_id"])
         await _safe_edit(
             query,
-            f"❓ مطمئنی می‌خواهی کانال «{label}» حذف شود؟",
+            f"❓ مطمئنی می‌خواهی مقصد «{label}» حذف شود؟",
             settings_confirm_keyboard(f"st:ch_del_yes:{raw}", "st:channels"),
         )
         return SETTINGS_PANEL, None

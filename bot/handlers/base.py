@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 
 from ..constants import Msg
 from ..database import get_workspace_db, registry
+from ..decorators import reject_if_banned
 from ..keyboards import main_menu_for, workspace_choice_keyboard
 from ..services.panels import close_panels_for
 from ..utils import register_panel_message, track_user
@@ -41,6 +42,8 @@ async def start(
         close_panels_for(context, update.effective_chat.id, user.id)
 
     track_user(update)
+    if await reject_if_banned(update):
+        return
     # برای هر کسی که ربات را استارت کند دیتابیس اختصاصی ساخته می‌شود
     get_workspace_db(user.id)
 
@@ -66,6 +69,8 @@ async def open_workspace_switcher(
         return
 
     track_user(update)
+    if await reject_if_banned(update):
+        return
     get_workspace_db(user.id)
 
     admin_workspaces = registry.get_admin_workspaces(user.id)
@@ -96,6 +101,8 @@ async def workspace_pick_callback(
 
     target_ws_id = int(match.group(1))
     track_user(update)
+    if await reject_if_banned(update):
+        return
 
     if target_ws_id == user.id:
         get_workspace_db(user.id)
