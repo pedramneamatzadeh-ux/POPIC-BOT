@@ -76,7 +76,10 @@ from .handlers.base import (
     start,
     workspace_pick_callback,
 )
-from .handlers.display_button import handle_display_button_callback
+from .handlers.display_button import (
+    handle_display_button_callback,
+    handle_react_button_callback,
+)
 from .handlers.old_post_edit import (
     handle_old_edit_callback,
     receive_old_btn_edit_text,
@@ -535,6 +538,9 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(
         CallbackQueryHandler(handle_display_button_callback, pattern=r"^pb_disp:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_react_button_callback, pattern=r"^pb_react:")
     )
     application.add_handler(
         CallbackQueryHandler(workspace_pick_callback, pattern=r"^ws_pick:\d+$")

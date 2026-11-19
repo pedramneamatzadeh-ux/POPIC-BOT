@@ -11,7 +11,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from ..config import config
 from ..constants import (
+    DEFAULT_LIKE_TEXT,
     DEFAULT_POPUP_TEXT,
+    DEFAULT_VOTE_TEXT,
     MAX_BUTTON_TEXT_LENGTH,
     MAX_CAPTION_LENGTH,
     MAX_COPY_TEXT_LENGTH,
@@ -36,6 +38,7 @@ from ..constants import (
     PM_SELECT_CHANNEL,
     Msg,
 )
+from ..database import get_workspace_db
 from ..decorators import workspace_access
 from ..keyboards import (
     confirm_action_keyboard,
@@ -49,6 +52,7 @@ from ..keyboards import (
     post_manage_list_keyboard,
     post_manage_update_targets_keyboard,
     post_media_choice_keyboard,
+    post_target_picker_keyboard,
     settings_confirm_keyboard,
 )
 from ..services.button_ui import (
@@ -62,6 +66,7 @@ from ..services.publisher import (
     is_media_type_mismatch_error,
     move_button_row,
     move_button_side,
+    normalize_buttons,
     send_post_to_chat,
     serialize_buttons,
     serialize_entities,
@@ -113,28 +118,82 @@ def _list_text(
     search_query: str = "",
     day_key: Optional[str] = None,
     day_count: int = 0,
+    all_count: Optional[int] = None,
+    sched_count: Optional[int] = None,
 ) -> str:
     q_note = (
-        f"\n🔍 فیلتر جست‌وجو: «<code>{html.escape(search_query)}</code>»"
+        f"\n🔍 فیلتر جست‌وجوی فعال: «<code>{html.escape(search_query)}</code>»"
         if search_query
         else ""
     )
+    summary_parts = []
+    if all_count is not None:
+        summary_parts.append(f"کل پست‌ها: <b>{all_count}</b> مورد")
+    if sched_count is not None:
+        summary_parts.append(f"در صف زمان‌بندی: <b>{sched_count}</b> مورد")
+    summary_line = ("📊 " + "  |  ".join(summary_parts)) if summary_parts else ""
+
+    guide_block = (
+        "💡 روی هر پست بزنید تا پیش‌نمایش زنده، ویرایش، انتخاب مقصد و زمان‌بندی آن باز شود.\n"
+        "• نشانگر وضعیت‌ها: ⏰ زمان‌بندی‌شده  |  ✅ منتشرشده  |  📝 پیش‌نویس"
+    )
+
     if tab == "sched":
         if total == 0:
-            return f"⏰ <b>پست‌های زمان‌بندی‌شده</b>{q_note}\n\nهیچ پست زمان‌بندی‌شده‌ای در صف نیست."
-        return (
-            f"⏰ <b>پست‌های زمان‌بندی‌شده</b> ({total} پست){q_note}\n"
-            f"📅 روز: <b>{html.escape(day_key or '—')}</b> ({day_count} پست) — صفحه {page + 1} از {pages}"
+            lines = [
+                f"⏰ <b>مدیریت و آرشیو پست‌های زمان‌بندی‌شده</b>{q_note}",
+            ]
+            if summary_line:
+                lines.append(summary_line)
+            lines.extend(
+                [
+                    "",
+                    "در حال حاضر هیچ پست زمان‌بندی‌شده‌ای در صف ارسال قرار ندارد.",
+                    "برای زمان‌بندی، یکی از پست‌ها را از تب «📋 همه» باز کرده و «⏰ زمان‌بندی پست» را بزنید.",
+                ]
+            )
+            return "\n".join(lines)
+        lines = [
+            f"⏰ <b>مدیریت و آرشیو پست‌های زمان‌بندی‌شده</b> ({total} پست){q_note}",
+        ]
+        if summary_line:
+            lines.append(summary_line)
+        lines.extend(
+            [
+                f"📅 روز: <b>{html.escape(day_key or '—')}</b> ({day_count} پست در این روز) — صفحه {page + 1} از {pages}",
+                guide_block,
+            ]
         )
+        return "\n".join(lines)
 
     if total == 0:
-        if search_query:
-            return f"📂 <b>پست‌های ذخیره‌شده</b>{q_note}\n\nنتیجه‌ای یافت نشد."
-        return "📂 <b>پست‌های ذخیره‌شده</b>\n\nهنوز پستی ثبت نشده است."
-    return (
-        f"📂 <b>پست‌های ذخیره‌شده</b> ({total} پست){q_note}\n"
-        f"📄 صفحه {page + 1} از {pages}"
+        lines = [
+            f"📂 <b>مدیریت و آرشیو پست‌های ذخیره‌شده</b>{q_note}",
+        ]
+        if summary_line:
+            lines.append(summary_line)
+        lines.extend(
+            [
+                "",
+                "نتیجه‌ای برای عبارت جست‌وجوشده پیدا نشد."
+                if search_query
+                else "هنوز هیچ پستی در این فضای کاری ذخیره نشده است؛ از منوی اصلی «📝 ساخت پست جدید» را بزنید.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines = [
+        f"📂 <b>مدیریت و آرشیو پست‌های ذخیره‌شده</b> ({total} پست){q_note}",
+    ]
+    if summary_line:
+        lines.append(summary_line)
+    lines.extend(
+        [
+            f"📄 صفحه {page + 1} از {pages} (نمایش حداکثر ۵ پست در هر صفحه)",
+            guide_block,
+        ]
     )
+    return "\n".join(lines)
 
 
 def _detail_text(
@@ -186,6 +245,13 @@ def _detail_text(
         ]
     )
 
+    try:
+        sel_ids = json.loads(post.get("scheduled_chat_ids") or "[]")
+    except Exception:
+        sel_ids = []
+    if sel_ids:
+        lines.append(f"• 🎯 مقصدهای انتخاب‌شده: <b>{len(sel_ids)} کانال/گروه</b>")
+
     if published_targets:
         lines.append(f"• منتشرشده در {len(published_targets)} مقصد:")
         for t in published_targets[:4]:
@@ -226,10 +292,12 @@ async def _sync_pm_preview_buttons(
     pv_mid = pm.get("preview_msg_id")
     if not pv_mid:
         return
+    vote_counts = get_workspace_db(ws_id).get_post_vote_counts(post["id"])
     markup = build_buttons_markup(
         deserialize_buttons(post.get("buttons_json")),
         workspace_id=ws_id,
         post_id=post["id"],
+        vote_counts=vote_counts,
     )
     try:
         await context.bot.edit_message_reply_markup(
@@ -331,6 +399,8 @@ async def _render_list(
             search_query=search_query,
             day_key=day_key,
             day_count=len(day_posts),
+            all_count=all_count,
+            sched_count=sched_count,
         )
     else:
         pages = total_pages(all_count, config.PAGE_SIZE)
@@ -347,6 +417,8 @@ async def _render_list(
             page=page,
             pages=pages,
             search_query=search_query,
+            all_count=all_count,
+            sched_count=sched_count,
         )
 
     pm["page"] = page
@@ -762,6 +834,7 @@ async def handle_post_manage_callback(
         if not raw.isdigit():
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return PM_LIST
+        pm.pop("pending_targets", None)
         await query.answer()
         return await _render_detail(
             context, ws_db, chat_id, int(raw), message_id=msg_id, refresh_preview=False
@@ -892,7 +965,11 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:btn_type:"):
         parts = data.split(":")
-        if len(parts) != 4 or not parts[2].isdigit() or parts[3] not in ("url", "popup", "copy"):
+        if (
+            len(parts) != 4
+            or not parts[2].isdigit()
+            or parts[3] not in ("url", "popup", "copy", "like", "vote")
+        ):
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return PM_DETAIL
         post_id = int(parts[2])
@@ -904,12 +981,24 @@ async def handle_post_manage_callback(
         pm["pending_btn_type"] = btn_type
         pm["msg_id"] = msg_id
         await query.answer()
+        if btn_type == "like":
+            prompt_text = Msg.POST_ASK_BTN_LIKE.format(default_like=DEFAULT_LIKE_TEXT)
+            pmode = "HTML"
+        elif btn_type == "vote":
+            prompt_text = Msg.POST_ASK_BTN_VOTE.format(default_vote=DEFAULT_VOTE_TEXT)
+            pmode = "HTML"
+        else:
+            prompt_text = Msg.POST_ASK_BTN_TEXT.format(
+                default=ws_db.get_default_button_text()
+            )
+            pmode = None
         await safe_edit_or_send(
             context=context,
             chat_id=chat_id,
-            text=Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
+            text=prompt_text,
             reply_markup=input_back_keyboard(f"pm:btns:{post_id}"),
             message_id=msg_id,
+            parse_mode=pmode,
         )
         return PM_ADD_BTN_TEXT
 
@@ -1074,9 +1163,26 @@ async def handle_post_manage_callback(
 
         if action == "btn_ctype" and len(parts) == 5:
             new_type = parts[4]
-            if new_type not in ("url", "popup", "copy"):
+            if new_type not in ("url", "popup", "copy", "like", "vote"):
                 await query.answer(Msg.INVALID_COMMAND, show_alert=True)
                 return PM_DETAIL
+            if new_type in ("like", "vote"):
+                cur = buttons[idx]
+                cur.pop("url", None)
+                cur.pop("popup_text", None)
+                cur.pop("copy_text", None)
+                cur["type"] = new_type
+                normalized = normalize_buttons(buttons)
+                ws_db.update_post(post_id, buttons_json=serialize_buttons(normalized))
+                updated_post = ws_db.get_post(post_id)
+                if updated_post:
+                    await _sync_pm_preview_buttons(
+                        context, chat_id, ws_id, updated_post, pm
+                    )
+                await query.answer("✅ نوع دکمه تغییر کرد.")
+                return await _render_button_inspector(
+                    context, ws_db, chat_id, post_id, idx, message_id=msg_id
+                )
             pm["post_id"] = post_id
             pm["editing_btn_idx"] = idx
             pm["editing_btn_type"] = new_type
@@ -1102,6 +1208,94 @@ async def handle_post_manage_callback(
             return await _render_buttons_panel(
                 context, ws_db, chat_id, post_id, message_id=msg_id
             )
+
+    if data.startswith("pm:targets:"):
+        raw = data.split(":", 2)[2]
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
+        if not post:
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        channels = ws_db.get_target_channels()
+        if not channels:
+            await query.answer(Msg.NO_CHANNELS_CONFIGURED, show_alert=True)
+            return PM_DETAIL
+        try:
+            selected = [int(x) for x in json.loads(post.get("scheduled_chat_ids") or "[]")]
+        except Exception:
+            selected = []
+        pm["post_id"] = post["id"]
+        pm["pending_targets"] = selected
+        await query.answer()
+        await safe_edit_or_send(
+            context=context,
+            chat_id=chat_id,
+            text="🎯 کانال‌ها یا گروه‌های مقصد را برای این پست انتخاب کن:",
+            reply_markup=post_target_picker_keyboard(
+                channels,
+                selected,
+                prefix="pm",
+                back_callback=f"pm:detail_panel:{post['id']}",
+            ),
+            message_id=msg_id,
+        )
+        return PM_DETAIL
+
+    if data.startswith("pm:tg_toggle:"):
+        raw_cid = data.split(":", 2)[2]
+        post_id = pm.get("post_id")
+        if not post_id or not raw_cid.lstrip("-").isdigit():
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return PM_DETAIL
+        cid = int(raw_cid)
+        channels = ws_db.get_target_channels()
+        selected = list(pm.get("pending_targets") or [])
+        if cid in selected:
+            selected.remove(cid)
+        else:
+            selected.append(cid)
+        pm["pending_targets"] = selected
+        await query.answer()
+        await safe_edit_or_send(
+            context=context,
+            chat_id=chat_id,
+            text="🎯 کانال‌ها یا گروه‌های مقصد را برای این پست انتخاب کن:",
+            reply_markup=post_target_picker_keyboard(
+                channels,
+                selected,
+                prefix="pm",
+                back_callback=f"pm:detail_panel:{post_id}",
+            ),
+            message_id=msg_id,
+        )
+        return PM_DETAIL
+
+    if data == "pm:tg_done":
+        post_id = pm.get("post_id")
+        if not post_id:
+            await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return PM_LIST
+        selected = list(pm.pop("pending_targets", []) or [])
+        ws_db.update_post(
+            post_id,
+            scheduled_chat_ids=json.dumps(selected),
+        )
+        await query.answer("✅ مقصدهای پست ذخیره شد.")
+        return await _render_detail(
+            context, ws_db, chat_id, post_id, message_id=msg_id, refresh_preview=False
+        )
+
+    if data.startswith("pm:save_back:"):
+        raw = data.split(":", 2)[2]
+        post_id = int(raw) if raw.isdigit() else pm.get("post_id")
+        if post_id and pm.get("pending_targets") is not None:
+            ws_db.update_post(
+                post_id,
+                scheduled_chat_ids=json.dumps(list(pm.pop("pending_targets") or [])),
+            )
+        await query.answer("✅ تغییرات ذخیره شد.")
+        return await _render_list(
+            context, ws_db, chat_id, pm.get("page", 0), message_id=msg_id
+        )
 
     if data.startswith("pm:pv:"):
         raw = data.split(":", 2)[2]
@@ -1168,7 +1362,8 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:send_ch:"):
         raw = data.split(":", 2)[2]
-        if not raw.isdigit() or not ws_db.get_post(int(raw)):
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
+        if not post:
             await query.answer("❌ پست پیدا نشد.", show_alert=True)
             return PM_LIST
         post_id = int(raw)
@@ -1176,6 +1371,26 @@ async def handle_post_manage_callback(
         if not channels:
             await query.answer(Msg.NO_CHANNELS_CONFIGURED, show_alert=True)
             return PM_DETAIL
+
+        try:
+            selected_cids = [
+                int(x) for x in json.loads(post.get("scheduled_chat_ids") or "[]")
+            ]
+        except Exception:
+            selected_cids = []
+        selected_channels = [ch for ch in channels if ch["chat_id"] in selected_cids]
+        if selected_channels:
+            alerts = []
+            for ch in selected_channels:
+                _, alert = await _publish_saved_post(
+                    context, ws_db, ws_id, post_id, ch["id"], user_id
+                )
+                alerts.append(f"{ch['title']}: {alert}")
+            await query.answer("\n".join(alerts)[:200], show_alert=True)
+            return await _render_detail(
+                context, ws_db, chat_id, post_id, message_id=msg_id, refresh_preview=False
+            )
+
         if len(channels) == 1:
             next_state, alert = await _publish_saved_post(
                 context, ws_db, ws_id, post_id, channels[0]["id"], user_id
@@ -1769,7 +1984,13 @@ async def receive_pm_btn_text(
     if not post_id:
         return ConversationHandler.END
 
-    default_label = ws_db.get_default_button_text()
+    btn_type = pm.get("pending_btn_type") or "url"
+    if btn_type == "like":
+        default_label = DEFAULT_LIKE_TEXT
+    elif btn_type == "vote":
+        default_label = DEFAULT_VOTE_TEXT
+    else:
+        default_label = ws_db.get_default_button_text()
     raw = (message.text or "").strip()
     label = default_label if raw == "-" else raw
     if not 1 <= len(label) <= MAX_BUTTON_TEXT_LENGTH:
@@ -1780,8 +2001,41 @@ async def receive_pm_btn_text(
         register_panel_message(context, sent.message_id)
         return PM_ADD_BTN_TEXT
 
+    if btn_type in ("like", "vote"):
+        ws_id = context.user_data["_ws_id"]
+        pm.pop("pending_btn_type", None)
+        pm.pop("pending_btn_label", None)
+        post = ws_db.get_post(post_id)
+        if not post:
+            return await _render_list(
+                context, ws_db, message.chat_id, pm.get("page", 0), message_id=pm.get("msg_id")
+            )
+        buttons = deserialize_buttons(post.get("buttons_json"))
+        next_row = max((b["row"] for b in buttons), default=-1) + 1
+        buttons.append(
+            {
+                "text": label,
+                "type": btn_type,
+                "style": None,
+                "row": next_row,
+            }
+        )
+        normalized = normalize_buttons(buttons)
+        ws_db.update_post(post_id, buttons_json=serialize_buttons(normalized))
+        updated_post = ws_db.get_post(post_id)
+        if updated_post:
+            await _sync_pm_preview_buttons(
+                context, message.chat_id, ws_id, updated_post, pm
+            )
+        try:
+            await message.delete()
+        except TelegramError:
+            pass
+        return await _render_buttons_panel(
+            context, ws_db, message.chat_id, post_id, message_id=pm.get("msg_id")
+        )
+
     pm["pending_btn_label"] = label
-    btn_type = pm.get("pending_btn_type") or "url"
     try:
         await message.delete()
     except TelegramError:
