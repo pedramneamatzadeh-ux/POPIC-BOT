@@ -13,7 +13,7 @@ class Config:
     DATA_DIR: str = os.path.join(_PROJECT_ROOT, "data")
     REGISTRY_DB_PATH: str = os.path.join(DATA_DIR, "registry.db")
     WORKSPACES_DIR: str = os.path.join(DATA_DIR, "workspaces")
-    PAGE_SIZE: int = 6
+    PAGE_SIZE: int = 5
 
     # مقادیر پیش‌فرض تغییرناپذیر برای هر دیتابیس جدید
     DEFAULT_SHOW_ABOVE_TEXT: bool = True
