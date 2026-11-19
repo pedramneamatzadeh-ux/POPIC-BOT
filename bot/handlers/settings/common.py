@@ -34,7 +34,7 @@ def _panel_text(owner_id: int) -> str:
             Msg.SETTINGS_TITLE,
             "",
             f"👨‍💼 ادمین‌های فضای شما: {len(admins)} نفر (به‌علاوه شما 👑)",
-            f"📢 کانال‌های مقصد: {len(channels)}",
+            f"📢 کانال‌ها و گروه‌های مقصد: {len(channels)}",
             f"🖼 پیش‌فرض پیش‌نمایش: {pos} | {size}",
             f"🏷 متن پیش‌فرض دکمه: «{ws_db.get_default_button_text()}»",
             f"🧩 نسخه: {BOT_VERSION} ({BOT_VERSION_DATE})",
@@ -92,15 +92,16 @@ def _admins_text(owner_id: int) -> str:
 def _channels_text(owner_id: int) -> str:
     ws_db = get_workspace_db(owner_id)
     channels = ws_db.get_target_channels()
-    lines = ["📢 کانال‌های مقصد فضای شما", ""]
+    lines = ["📢 کانال‌ها و گروه‌های مقصد فضای شما", ""]
 
     if not channels:
-        lines.append("— هیچ کانال مقصدی ثبت نشده است")
+        lines.append("— هیچ کانال یا گروه مقصدی ثبت نشده است")
     else:
         for ch in channels:
+            icon = "👥" if (ch.get("chat_type") or "") in ("group", "supergroup") else "📢"
             title = ch.get("title") or "—"
             uname = f" (@{ch['username']})" if ch.get("username") else ""
-            lines.append(f"📢 {title}{uname} — {ch['chat_id']}")
+            lines.append(f"{icon} {title}{uname} — {ch['chat_id']}")
 
     return "\n".join(lines)
 

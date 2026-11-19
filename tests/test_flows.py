@@ -31,6 +31,7 @@ from bot.constants import (
     POST_PHOTO_UPLOAD,
     POST_PREVIEW,
     POST_TEXT,
+    POST_TITLE,
     SETTINGS_ADMIN,
     SETTINGS_BTN_LABEL,
     SETTINGS_CHANNEL,
@@ -56,6 +57,7 @@ from bot.handlers.post_builder import (
     confirm_cancel_yes,
     handle_media_choice_callback,
     handle_preview_callback,
+    handle_skip_title_callback,
     receive_btn_edit_text,
     receive_btn_edit_value,
     receive_btn_text,
@@ -64,6 +66,7 @@ from bot.handlers.post_builder import (
     receive_photo_link,
     receive_photo_upload,
     receive_post_text,
+    receive_post_title,
     start_post_builder,
 )
 from bot.handlers.post_manage import (
@@ -279,8 +282,12 @@ class FlowTests(unittest.TestCase):
 
             msg1 = _make_message(bot, 2000, 2000, "📝 ساخت پست جدید")
             state = await start_post_builder(_make_update(2000, 2000, message=msg1), ctx)
-            self.assertEqual(state, POST_TEXT)
+            self.assertEqual(state, POST_TITLE)
             self.assertIsInstance(bot.sent_messages[0]["reply_markup"], ReplyKeyboardRemove)
+
+            title_msg = _make_message(bot, 2000, 2000, "عنوان تست پست")
+            state = await receive_post_title(_make_update(2000, 2000, message=title_msg), ctx)
+            self.assertEqual(state, POST_TEXT)
 
             too_long = _make_message(bot, 2000, 2000, "ا" * 4100)
             state = await receive_post_text(_make_update(2000, 2000, message=too_long), ctx)

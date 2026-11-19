@@ -10,6 +10,23 @@ from .database import registry, resolve_user_workspace
 from .keyboards import main_menu_for
 
 
+def _is_blocked_user(user_id: int) -> bool:
+    if config.OWNER_ID is not None and int(user_id) == int(config.OWNER_ID):
+        return False
+    return registry.is_user_banned(user_id)
+
+
+async def reject_if_banned(update: Update) -> bool:
+    user = update.effective_user
+    if not user or not _is_blocked_user(user.id):
+        return False
+    if update.message:
+        await update.message.reply_text(Msg.USER_BANNED)
+    elif update.callback_query:
+        await update.callback_query.answer(Msg.USER_BANNED, show_alert=True)
+    return True
+
+
 def env_owner_only(func: Callable[..., Any]) -> Callable[..., Any]:
     """فقط مالک اصلی ربات (تنظیم‌شده در OWNER_ID فایل .env) اجازه دسترسی دارد."""
     @wraps(func)
@@ -57,6 +74,9 @@ def workspace_owner_only(func: Callable[..., Any]) -> Callable[..., Any]:
         registry.save_or_update_user(
             user.id, user.username, user.first_name, user.last_name
         )
+        if await reject_if_banned(update):
+            return ConversationHandler.END
+
         ws_id, status, ws_db = resolve_user_workspace(user.id)
 
         if status == "revoked_to_owner":
@@ -100,6 +120,9 @@ def workspace_access(func: Callable[..., Any]) -> Callable[..., Any]:
         registry.save_or_update_user(
             user.id, user.username, user.first_name, user.last_name
         )
+        if await reject_if_banned(update):
+            return ConversationHandler.END
+
         ws_id, status, ws_db = resolve_user_workspace(user.id)
 
         if status == "revoked_to_owner":

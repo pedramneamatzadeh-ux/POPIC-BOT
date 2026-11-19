@@ -7,7 +7,12 @@ from typing import Dict, Optional
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
-from ..constants import SETTINGS_BUTTON, SWITCH_WORKSPACE_BUTTON, Msg
+from ..constants import (
+    OLD_EDIT_BUTTON,
+    SETTINGS_BUTTON,
+    SWITCH_WORKSPACE_BUTTON,
+    Msg,
+)
 from ..utils import PANEL_MSG_KEY
 
 logger = logging.getLogger(__name__)
@@ -15,6 +20,7 @@ logger = logging.getLogger(__name__)
 PANEL_BUTTONS = (
     "📝 ساخت پست جدید",
     "📂 پست‌های ذخیره‌شده",
+    OLD_EDIT_BUTTON,
     "📊 آمار",
     SETTINGS_BUTTON,
     SWITCH_WORKSPACE_BUTTON,

@@ -18,6 +18,7 @@ from ..constants import (
     DEFAULT_POPUP_TEXT,
     MAX_BUTTONS_PER_ROW,
     MAX_COPY_TEXT_LENGTH,
+    MAX_EXTRA_BUTTONS,
     MAX_POPUP_TEXT_LENGTH,
 )
 
@@ -136,6 +137,11 @@ def normalize_button_item(
     elif btn_type == "popup":
         popup_text = str(raw.get("popup_text") or DEFAULT_POPUP_TEXT).strip()
         item["popup_text"] = (popup_text or DEFAULT_POPUP_TEXT)[:MAX_POPUP_TEXT_LENGTH]
+        if raw.get("popup_id"):
+            try:
+                item["popup_id"] = int(raw["popup_id"])
+            except (TypeError, ValueError):
+                pass
     elif btn_type == "copy":
         copy_text = str(raw.get("copy_text") or "").strip()
         if not copy_text:
@@ -363,7 +369,9 @@ def build_buttons_markup(
             elif btn_type == "copy" and b.get("copy_text"):
                 kwargs["copy_text"] = CopyTextButton(text=b["copy_text"])
             elif btn_type == "popup":
-                if workspace_id is not None and post_id is not None:
+                if b.get("popup_id") and workspace_id is not None:
+                    kwargs["callback_data"] = f"pb_disp:old:{int(workspace_id)}:{int(b['popup_id'])}"
+                elif workspace_id is not None and post_id is not None:
                     kwargs["callback_data"] = f"pb_disp:{int(workspace_id)}:{int(post_id)}:{idx}"
                 else:
                     kwargs["callback_data"] = f"pb_disp:pv:{idx}"
@@ -375,6 +383,65 @@ def build_buttons_markup(
             kb_rows.append(kb_row)
 
     return InlineKeyboardMarkup(kb_rows) if kb_rows else None
+
+
+def extract_buttons_from_markup(reply_markup: Any) -> List[Dict[str, Any]]:
+    """استخراج دکمه‌های قابل ویرایش (URL / Copy) از پیام قدیمی فورواردشده."""
+    keyboard = getattr(reply_markup, "inline_keyboard", None)
+    if not keyboard:
+        return []
+    items: List[Dict[str, Any]] = []
+    for row_idx, row in enumerate(keyboard):
+        for btn in row:
+            text = (getattr(btn, "text", None) or "").strip()
+            if not text:
+                continue
+            style = getattr(btn, "style", None)
+            if style not in ("primary", "success", "danger"):
+                style = None
+            url = getattr(btn, "url", None)
+            copy_obj = getattr(btn, "copy_text", None)
+            copy_val = getattr(copy_obj, "text", None) if copy_obj else None
+            if url:
+                items.append(
+                    {
+                        "text": text,
+                        "type": "url",
+                        "url": url,
+                        "style": style,
+                        "row": row_idx,
+                    }
+                )
+            elif copy_val:
+                items.append(
+                    {
+                        "text": text,
+                        "type": "copy",
+                        "copy_text": copy_val,
+                        "style": style,
+                        "row": row_idx,
+                    }
+                )
+            if len(items) >= MAX_EXTRA_BUTTONS:
+                return normalize_buttons(items)
+    return normalize_buttons(items)
+
+
+def is_media_type_mismatch_error(exc: Exception) -> bool:
+    """تشخیص خطای تلگرام هنگام تلاش برای تغییر نوع پیام بین عکس و متن."""
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "there is no text in the message to edit",
+            "there is no media in the message to edit",
+            "there is no caption in the message to edit",
+            "message media not found",
+            "wrong type of the web page content",
+            "can't use",
+            "media_empty",
+        )
+    )
 
 
 def build_link_preview_options(

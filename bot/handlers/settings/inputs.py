@@ -133,6 +133,7 @@ async def receive_channel_input(
         title=getattr(chat, "title", None) or "",
         username=getattr(chat, "username", None) or "",
         added_by=owner_id,
+        chat_type=getattr(chat, "type", "channel") or "channel",
     )
 
     text = f"{Msg.CHANNEL_ADDED}\n\n{_channels_text(owner_id)}"

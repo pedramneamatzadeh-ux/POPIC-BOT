@@ -36,6 +36,8 @@ class RegistryDatabase:
                     first_name TEXT,
                     last_name TEXT,
                     active_workspace_id INTEGER,
+                    is_banned INTEGER NOT NULL DEFAULT 0,
+                    banned_at TIMESTAMP,
                     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -51,6 +53,18 @@ class RegistryDatabase:
                     ON workspace_admins(admin_user_id);
                 """
             )
+            existing_cols = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(users)").fetchall()
+            }
+            if "is_banned" not in existing_cols:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0"
+                )
+            if "banned_at" not in existing_cols:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN banned_at TIMESTAMP"
+                )
             connection.execute("PRAGMA journal_mode = WAL")
 
     def save_or_update_user(
@@ -90,6 +104,49 @@ class RegistryDatabase:
                 "SELECT * FROM users ORDER BY last_activity DESC"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_users_paginated(
+        self,
+        limit: int = 8,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM users
+                ORDER BY last_activity DESC, user_id ASC
+                LIMIT ? OFFSET ?
+                """,
+                (int(limit), int(offset)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_users(self) -> int:
+        with self.connect() as connection:
+            return int(
+                connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            )
+
+    def is_user_banned(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT is_banned FROM users WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+        return bool(row and row["is_banned"])
+
+    def set_user_banned(self, user_id: int, banned: bool) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE users
+                SET is_banned = ?,
+                    banned_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
+                WHERE user_id = ?
+                """,
+                (1 if banned else 0, 1 if banned else 0, int(user_id)),
+            )
+            return cursor.rowcount > 0
 
     def get_user_display_name(self, user_id: int) -> str:
         user = self.get_user(user_id)
