@@ -750,6 +750,114 @@ class V050Tests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_r16_target_picker_button_label_and_schedule_warning(self) -> None:
+        from bot.handlers.post_builder.common import build_control_summary
+        from bot.keyboards import old_post_edit_panel_keyboard
+
+        old_texts = [
+            b.text
+            for row in old_post_edit_panel_keyboard(buttons_count=0).inline_keyboard
+            for b in row
+        ]
+        self.assertIn("🔘 دکمه شیشه‌ای (اختیاری)", old_texts)
+
+        summary = build_control_summary(
+            {
+                "text": "پست تست",
+                "media_type": "none",
+                "show_above_text": True,
+                "prefer_large_media": True,
+                "buttons": [],
+            }
+        )
+        self.assertIn("همون لحظه", summary)
+        self.assertIn("انتخاب مقصد", summary)
+        self.assertIn("ذخیره و منوی اصلی", summary)
+
+        async def run():
+            bot = _V050FakeBot()
+            ctx = _ctx(bot)
+            ws_db = get_workspace_db(7100)
+            ws_db.add_target_channel(-100801, "Ch 801", "ch801", 7100)
+            ws_db.add_target_channel(-100802, "Grp 802", "grp802", 7100, chat_type="supergroup")
+
+            await start_post_builder(
+                _upd(7100, 7100, message=_msg(bot, 7100, 7100, "📝 ساخت پست جدید")),
+                ctx,
+            )
+            await receive_post_title(
+                _upd(7100, 7100, message=_msg(bot, 7100, 7100, "پست مقصد")),
+                ctx,
+            )
+            await receive_post_text(
+                _upd(7100, 7100, message=_msg(bot, 7100, 7100, "متن زمان‌بندی")),
+                ctx,
+            )
+            q_mid = ctx.user_data["_pb_question_mid"]
+            await handle_media_choice_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, q_mid, "pb:media:none")),
+                ctx,
+            )
+            ctrl_mid = ctx.user_data["pb"]["ctrl_msg_id"]
+
+            # Pick targets directly from preview control panel without immediate publish
+            await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:targets")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:tg_toggle:-100801")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:tg_toggle:-100802")),
+                ctx,
+            )
+            await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:tg_done")),
+                ctx,
+            )
+            self.assertEqual(set(ctx.user_data["pb"]["target_chat_ids"]), {-100801, -100802})
+            self.assertIn("Ch 801", bot.edited_messages[-1]["text"])
+            # Nothing sent immediately to channels!
+            self.assertEqual(
+                [m for m in bot.sent_messages if m["chat_id"] in (-100801, -100802)],
+                [],
+            )
+
+            # Schedule for 2099 and then click pb:done -> saved with both targets, not sent yet
+            await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:sched")),
+                ctx,
+            )
+            await handle_pb_schedule_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:sched_year")),
+                ctx,
+            )
+            await receive_pb_sched_year(
+                _upd(7100, 7100, message=_msg(bot, 7100, 7100, "2099")),
+                ctx,
+            )
+            await handle_pb_schedule_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:sched_confirm")),
+                ctx,
+            )
+            await handle_pb_schedule_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:sched_save")),
+                ctx,
+            )
+            state = await handle_preview_callback(
+                _upd(7100, 7100, callback_query=_query(bot, 7100, 7100, ctrl_mid, "pb:done")),
+                ctx,
+            )
+            self.assertEqual(state, ConversationHandler.END)
+            saved = ws_db.get_post(1)
+            self.assertEqual(saved["schedule_status"], "pending")
+            self.assertIn("-100801", saved["scheduled_chat_ids"])
+            self.assertIn("-100802", saved["scheduled_chat_ids"])
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

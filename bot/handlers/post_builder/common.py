@@ -102,10 +102,28 @@ def build_control_summary(pb: Dict[str, Any]) -> str:
     if pb.get("scheduled_at"):
         lines.append(f"• ⏰ زمان‌بندی: <b>{html.escape(fmt_schedule_tehran(pb['scheduled_at']))}</b>")
 
+    target_names = pb.get("target_chat_names") or []
+    if target_names:
+        lines.append(
+            f"• 🎯 مقصدهای انتخاب‌شده: <b>{html.escape('، '.join(target_names))}</b>"
+        )
+    elif pb.get("target_chat_ids"):
+        lines.append(
+            f"• 🎯 مقصدهای انتخاب‌شده: <b>{len(pb['target_chat_ids'])} مورد</b>"
+        )
+
     if btns_count:
         lines.append(f"• دکمه‌های شیشه‌ای: {btns_count}")
-    lines.append("")
-    lines.append("یکی از گزینه‌های زیر را انتخاب کن:")
+    lines.extend(
+        [
+            "",
+            "⚠️ <b>توجه:</b>",
+            "• اگر دکمهٔ «📤 ارسال به کانال» را بزنید، پست <b>همون لحظه</b> در کانال/گروه منتشر می‌شود.",
+            "• اگر پست را <b>زمان‌بندی</b> کرده‌اید، فقط از «🎯 انتخاب مقصد» مقصدها را انتخاب کرده و بعدش «✅ ذخیره و منوی اصلی» را بزنید تا پست در زمان مقرر ارسال شود (و در پی‌وی هم بماند).",
+            "",
+            "یکی از گزینه‌های زیر را انتخاب کن:",
+        ]
+    )
     return "\n".join(lines)
 
 

@@ -261,13 +261,13 @@ def post_preview_controls_keyboard(
     btns_label = (
         f"🔘 دکمه‌های شیشه‌ای ({extra_buttons_count})"
         if extra_buttons_count
-        else "🔘 افزودن دکمه شیشه‌ای (اختیاری)"
+        else "🔘 دکمه شیشه‌ای (اختیاری)"
     )
 
     rows = [
         [
             ib("📤 ارسال به کانال", callback_data="pb:send_ch", style="success"),
-            ib("📥 تحویل در پی‌وی", callback_data="pb:send_pv", style="success"),
+            ib("🎯 انتخاب مقصد", callback_data="pb:targets", style="primary"),
         ],
     ]
     if media_type == "link":
@@ -320,6 +320,37 @@ def post_channels_keyboard(
                 )
             ]
         )
+    rows.append([ib("◀️ بازگشت", callback_data=back_callback, style="danger")])
+    return InlineKeyboardMarkup(rows)
+
+
+def post_target_picker_keyboard(
+    channels: List[Dict[str, Any]],
+    selected_chat_ids: List[int],
+    prefix: str = "pb",
+    back_callback: str = "pb:back_preview",
+) -> InlineKeyboardMarkup:
+    selected_set = {int(x) for x in selected_chat_ids}
+    rows: List[List[InlineKeyboardButton]] = []
+    for ch in channels:
+        cid = int(ch["chat_id"])
+        title = ch.get("title") or (
+            f"@{ch['username']}" if ch.get("username") else str(cid)
+        )
+        icon = _chat_icon(ch.get("chat_type") or "channel")
+        mark = "✅" if cid in selected_set else "⬜"
+        rows.append(
+            [
+                ib(
+                    f"{mark} {icon} {title}",
+                    callback_data=f"{prefix}:tg_toggle:{cid}",
+                    style="success" if cid in selected_set else "primary",
+                )
+            ]
+        )
+    rows.append(
+        [ib("✅ تأیید مقصد", callback_data=f"{prefix}:tg_done", style="success")]
+    )
     rows.append([ib("◀️ بازگشت", callback_data=back_callback, style="danger")])
     return InlineKeyboardMarkup(rows)
 
@@ -621,7 +652,7 @@ def post_manage_detail_keyboard(
     btns_label = (
         f"🔘 دکمه‌های شیشه‌ای ({buttons_count})"
         if buttons_count
-        else "🔘 افزودن دکمه شیشه‌ای (اختیاری)"
+        else "🔘 دکمه شیشه‌ای (اختیاری)"
     )
 
     has_published = (
@@ -740,7 +771,7 @@ def old_post_edit_panel_keyboard(
     btns_lbl = (
         f"🔘 دکمه‌های شیشه‌ای ({buttons_count})"
         if buttons_count
-        else "🔘 افزودن دکمه شیشه‌ای"
+        else "🔘 دکمه شیشه‌ای (اختیاری)"
     )
     rows = [
         [
