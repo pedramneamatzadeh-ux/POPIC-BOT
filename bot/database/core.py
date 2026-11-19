@@ -95,6 +95,21 @@ class CoreMixin:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS old_button_sets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    buttons_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS button_votes (
+                    scope TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    btn_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (scope, target_id, btn_id, user_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_posts_created
                     ON posts(created_at);
 
@@ -103,6 +118,9 @@ class CoreMixin:
 
                 CREATE INDEX IF NOT EXISTS idx_deliveries_post
                     ON post_deliveries(post_id);
+
+                CREATE INDEX IF NOT EXISTS idx_button_votes_target
+                    ON button_votes(scope, target_id);
                 """
             )
             ch_cols = {

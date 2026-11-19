@@ -72,8 +72,8 @@ class CoreTests(unittest.TestCase):
         app = create_application()
         self.assertIn(-1, app.handlers)
         self.assertIn(0, app.handlers)
-        # group 0: /start + pb_disp + ws_pick + switch_btn + 5 convs + backup = 10
-        self.assertEqual(len(app.handlers[0]), 10)
+        # group 0: /start + pb_disp + pb_react + ws_pick + switch_btn + 5 convs + backup = 11
+        self.assertEqual(len(app.handlers[0]), 11)
         self.assertEqual(len(app.handlers[1]), 1)
         self.assertTrue(len(app.error_handlers) >= 1)
 

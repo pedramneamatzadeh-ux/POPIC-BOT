@@ -273,6 +273,7 @@ class PostsMixin:
         show_above_text: Optional[bool] = None,
         prefer_large_media: Optional[bool] = None,
         buttons_json: Optional[str] = None,
+        scheduled_chat_ids: Optional[str] = None,
     ) -> bool:
         sets: List[str] = []
         params: List[Any] = []
@@ -304,6 +305,9 @@ class PostsMixin:
         if buttons_json is not None:
             sets.append("buttons_json = ?")
             params.append(buttons_json)
+        if scheduled_chat_ids is not None:
+            sets.append("scheduled_chat_ids = ?")
+            params.append(scheduled_chat_ids)
 
         if not sets:
             return False
@@ -479,6 +483,107 @@ class PostsMixin:
                 (int(popup_id),),
             ).fetchone()
         return row["popup_text"] if row else None
+
+    def save_old_button_set(
+        self, buttons_json: str, set_id: Optional[int] = None
+    ) -> int:
+        with self.connect() as connection:
+            if set_id is not None:
+                cur = connection.execute(
+                    "UPDATE old_button_sets SET buttons_json = ? WHERE id = ?",
+                    (buttons_json or "[]", int(set_id)),
+                )
+                if cur.rowcount > 0:
+                    return int(set_id)
+            cursor = connection.execute(
+                "INSERT INTO old_button_sets (buttons_json) VALUES (?)",
+                (buttons_json or "[]",),
+            )
+            return int(cursor.lastrowid)
+
+    def get_old_button_set(self, set_id: int) -> Optional[str]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT buttons_json FROM old_button_sets WHERE id = ?",
+                (int(set_id),),
+            ).fetchone()
+        return row["buttons_json"] if row else None
+
+    def get_vote_counts(self, scope: str, target_id: int) -> Dict[str, int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT btn_id, COUNT(*) AS cnt
+                FROM button_votes
+                WHERE scope = ? AND target_id = ?
+                GROUP BY btn_id
+                """,
+                (scope, int(target_id)),
+            ).fetchall()
+        return {str(row["btn_id"]): int(row["cnt"]) for row in rows}
+
+    def get_post_vote_counts(self, post_id: int) -> Dict[str, int]:
+        return self.get_vote_counts("post", int(post_id))
+
+    def toggle_button_vote(
+        self,
+        scope: str,
+        target_id: int,
+        btn_id: str,
+        user_id: int,
+        exclusive_btn_ids: Optional[List[str]] = None,
+    ) -> tuple[str, Dict[str, int]]:
+        """ثبت/حذف رأی منحصربه‌فرد هر کاربر برای دکمه‌های لایک و نظرسنجی."""
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT 1 FROM button_votes
+                WHERE scope = ? AND target_id = ? AND btn_id = ? AND user_id = ?
+                """,
+                (scope, int(target_id), str(btn_id), int(user_id)),
+            ).fetchone()
+
+            if existing:
+                connection.execute(
+                    """
+                    DELETE FROM button_votes
+                    WHERE scope = ? AND target_id = ? AND btn_id = ? AND user_id = ?
+                    """,
+                    (scope, int(target_id), str(btn_id), int(user_id)),
+                )
+                action = "removed"
+            else:
+                switched = False
+                if exclusive_btn_ids:
+                    placeholders = ",".join("?" for _ in exclusive_btn_ids)
+                    cur = connection.execute(
+                        f"""
+                        DELETE FROM button_votes
+                        WHERE scope = ? AND target_id = ? AND user_id = ?
+                          AND btn_id IN ({placeholders})
+                        """,
+                        (scope, int(target_id), int(user_id), *[str(x) for x in exclusive_btn_ids]),
+                    )
+                    switched = cur.rowcount > 0
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO button_votes (scope, target_id, btn_id, user_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (scope, int(target_id), str(btn_id), int(user_id)),
+                )
+                action = "switched" if switched else "added"
+
+            rows = connection.execute(
+                """
+                SELECT btn_id, COUNT(*) AS cnt
+                FROM button_votes
+                WHERE scope = ? AND target_id = ?
+                GROUP BY btn_id
+                """,
+                (scope, int(target_id)),
+            ).fetchall()
+        return action, {str(row["btn_id"]): int(row["cnt"]) for row in rows}
 
     def get_stats_summary(self) -> Dict[str, Any]:
         with self.connect() as connection:

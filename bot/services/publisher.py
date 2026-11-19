@@ -2,6 +2,7 @@
 
 import json
 import logging
+import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from telegram import (
@@ -24,7 +25,7 @@ from ..constants import (
 
 logger = logging.getLogger(__name__)
 
-VALID_BUTTON_TYPES = ("url", "popup", "copy")
+VALID_BUTTON_TYPES = ("url", "popup", "copy", "like", "vote")
 VALID_BUTTON_STYLES = (None, "primary", "success", "danger")
 
 STYLE_LABELS = {
@@ -45,12 +46,16 @@ TYPE_LABELS = {
     "url": "🔗 لینکدار",
     "popup": "💬 نمایشی (پاپ‌آپ)",
     "copy": "📋 کپی متن",
+    "like": "❤️ لایک / شمارنده واکنش",
+    "vote": "📊 نظرسنجی تک‌انتخابی",
 }
 
 TYPE_ICONS = {
     "url": "🔗",
     "popup": "💬",
     "copy": "📋",
+    "like": "❤️",
+    "vote": "📊",
 }
 
 
@@ -147,6 +152,10 @@ def normalize_button_item(
         if not copy_text:
             return None
         item["copy_text"] = copy_text[:MAX_COPY_TEXT_LENGTH]
+    elif btn_type in ("like", "vote"):
+        raw_id = str(raw.get("btn_id") or "").strip()
+        clean_id = "".join(ch for ch in raw_id if ch.isalnum() or ch in ("_", "-"))[:16]
+        item["btn_id"] = clean_id or uuid.uuid4().hex[:8]
 
     return item
 
@@ -348,11 +357,14 @@ def build_buttons_markup(
     buttons: Optional[List[Dict[str, Any]]],
     workspace_id: Optional[int] = None,
     post_id: Optional[int] = None,
+    vote_counts: Optional[Dict[str, int]] = None,
+    old_set_id: Optional[int] = None,
 ) -> Optional[InlineKeyboardMarkup]:
     normalized = normalize_buttons(buttons)
     if not normalized:
         return None
 
+    counts = vote_counts or {}
     grouped = group_buttons_by_row(normalized)
     kb_rows: List[List[InlineKeyboardButton]] = []
 
@@ -364,6 +376,7 @@ def build_buttons_markup(
                 kwargs["style"] = b["style"]
 
             btn_type = b.get("type", "url")
+            btn_label = b["text"]
             if btn_type == "url" and b.get("url"):
                 kwargs["url"] = b["url"]
             elif btn_type == "copy" and b.get("copy_text"):
@@ -375,10 +388,20 @@ def build_buttons_markup(
                     kwargs["callback_data"] = f"pb_disp:{int(workspace_id)}:{int(post_id)}:{idx}"
                 else:
                     kwargs["callback_data"] = f"pb_disp:pv:{idx}"
+            elif btn_type in ("like", "vote") and b.get("btn_id"):
+                bid = str(b["btn_id"])
+                cnt = int(counts.get(bid, 0))
+                btn_label = f"{b['text']} ({cnt})"
+                if old_set_id is not None and workspace_id is not None:
+                    kwargs["callback_data"] = f"pb_react:old:{int(workspace_id)}:{int(old_set_id)}:{bid}"
+                elif workspace_id is not None and post_id is not None:
+                    kwargs["callback_data"] = f"pb_react:{int(workspace_id)}:{int(post_id)}:{bid}"
+                else:
+                    kwargs["callback_data"] = f"pb_react:pv:{bid}"
             else:
                 continue
 
-            kb_row.append(InlineKeyboardButton(text=b["text"], **kwargs))
+            kb_row.append(InlineKeyboardButton(text=btn_label, **kwargs))
         if kb_row:
             kb_rows.append(kb_row)
 
@@ -458,6 +481,26 @@ def build_link_preview_options(
     )
 
 
+def _resolve_vote_counts(
+    buttons: Optional[List[Dict[str, Any]]],
+    workspace_id: Optional[int],
+    post_id: Optional[int],
+    vote_counts: Optional[Dict[str, int]],
+) -> Optional[Dict[str, int]]:
+    if vote_counts is not None:
+        return vote_counts
+    if workspace_id is None or post_id is None or not buttons:
+        return None
+    if not any(b.get("type") in ("like", "vote") for b in buttons):
+        return None
+    try:
+        from ..database import get_workspace_db
+
+        return get_workspace_db(workspace_id).get_post_vote_counts(post_id)
+    except Exception:
+        return None
+
+
 async def send_post_to_chat(
     bot: Any,
     chat_id: int,
@@ -471,12 +514,17 @@ async def send_post_to_chat(
     post_id: Optional[int] = None,
     media_type: str = "link",
     photo_file_id: str = "",
+    vote_counts: Optional[Dict[str, int]] = None,
+    old_set_id: Optional[int] = None,
 ) -> Message:
     entities = deserialize_entities(entities_json)
+    resolved_counts = _resolve_vote_counts(buttons, workspace_id, post_id, vote_counts)
     markup = build_buttons_markup(
         buttons,
         workspace_id=workspace_id,
         post_id=post_id,
+        vote_counts=resolved_counts,
+        old_set_id=old_set_id,
     )
 
     if media_type == "photo" and photo_file_id:
@@ -520,12 +568,17 @@ async def edit_post_in_chat(
     post_id: Optional[int] = None,
     media_type: str = "link",
     photo_file_id: str = "",
+    vote_counts: Optional[Dict[str, int]] = None,
+    old_set_id: Optional[int] = None,
 ) -> Any:
     entities = deserialize_entities(entities_json)
+    resolved_counts = _resolve_vote_counts(buttons, workspace_id, post_id, vote_counts)
     markup = build_buttons_markup(
         buttons,
         workspace_id=workspace_id,
         post_id=post_id,
+        vote_counts=resolved_counts,
+        old_set_id=old_set_id,
     )
 
     if media_type == "photo" and photo_file_id:

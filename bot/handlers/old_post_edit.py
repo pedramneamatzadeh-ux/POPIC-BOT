@@ -9,7 +9,9 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ..constants import (
+    DEFAULT_LIKE_TEXT,
     DEFAULT_POPUP_TEXT,
+    DEFAULT_VOTE_TEXT,
     MAX_BUTTON_TEXT_LENGTH,
     MAX_CAPTION_LENGTH,
     MAX_COPY_TEXT_LENGTH,
@@ -50,6 +52,7 @@ from ..services.publisher import (
     move_button_side,
     normalize_buttons,
     send_post_to_chat,
+    serialize_buttons,
     serialize_entities,
     split_button_new_row,
 )
@@ -133,6 +136,21 @@ def _bind_old_popups(ws_db: Any, buttons: List[Dict[str, Any]]) -> List[Dict[str
                 b.get("popup_text") or DEFAULT_POPUP_TEXT
             )
     return bound
+
+
+def _prepare_old_buttons_for_publish(
+    ws_db: Any,
+    old: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], int | None, Dict[str, int] | None]:
+    bound = _bind_old_popups(ws_db, old.get("buttons") or [])
+    old["buttons"] = bound
+    if any(b.get("type") in ("like", "vote") for b in bound):
+        set_id = ws_db.save_old_button_set(
+            serialize_buttons(bound), set_id=old.get("old_set_id")
+        )
+        old["old_set_id"] = set_id
+        return bound, set_id, ws_db.get_vote_counts("old", set_id)
+    return bound, None, None
 
 
 def _value_prompt_for_type(btn_type: str, label: str) -> str:
@@ -525,18 +543,30 @@ async def handle_old_edit_callback(
 
     if data.startswith("old:btn_type:"):
         btn_type = data.split(":", 2)[2]
-        if btn_type not in ("url", "popup", "copy"):
+        if btn_type not in ("url", "popup", "copy", "like", "vote"):
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return OLD_PANEL
         old["pending_btn_type"] = btn_type
         old["panel_msg_id"] = msg_id
         await query.answer()
+        if btn_type == "like":
+            prompt_text = Msg.POST_ASK_BTN_LIKE.format(default_like=DEFAULT_LIKE_TEXT)
+            pmode = "HTML"
+        elif btn_type == "vote":
+            prompt_text = Msg.POST_ASK_BTN_VOTE.format(default_vote=DEFAULT_VOTE_TEXT)
+            pmode = "HTML"
+        else:
+            prompt_text = Msg.POST_ASK_BTN_TEXT.format(
+                default=ws_db.get_default_button_text()
+            )
+            pmode = None
         await safe_edit_or_send(
             context=context,
             chat_id=chat_id,
-            text=Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
+            text=prompt_text,
             reply_markup=input_back_keyboard("old:btns"),
             message_id=msg_id,
+            parse_mode=pmode,
         )
         return OLD_ADD_BTN_TEXT
 
@@ -620,9 +650,20 @@ async def handle_old_edit_callback(
 
         if action == "btn_ctype" and len(parts) == 4:
             new_type = parts[3]
-            if new_type not in ("url", "popup", "copy"):
+            if new_type not in ("url", "popup", "copy", "like", "vote"):
                 await query.answer(Msg.INVALID_COMMAND, show_alert=True)
                 return OLD_PANEL
+            if new_type in ("like", "vote"):
+                cur = buttons[idx]
+                cur.pop("url", None)
+                cur.pop("popup_text", None)
+                cur.pop("copy_text", None)
+                cur["type"] = new_type
+                old["buttons"] = normalize_buttons(buttons)
+                await query.answer("✅ نوع دکمه تغییر کرد.")
+                return await _show_old_button_inspector(
+                    context, chat_id, old, idx, message_id=msg_id
+                )
             old["editing_btn_idx"] = idx
             old["editing_btn_type"] = new_type
             old["panel_msg_id"] = msg_id
@@ -669,7 +710,7 @@ async def handle_old_edit_callback(
             )
             return OLD_PANEL
 
-        old["buttons"] = _bind_old_popups(ws_db, old.get("buttons") or [])
+        bound_btns, old_set_id, vote_counts = _prepare_old_buttons_for_publish(ws_db, old)
         try:
             await edit_post_in_chat(
                 bot=context.bot,
@@ -680,10 +721,12 @@ async def handle_old_edit_callback(
                 photo_url=old.get("photo_url") or "",
                 show_above_text=bool(old.get("show_above_text", True)),
                 prefer_large_media=bool(old.get("prefer_large_media", True)),
-                buttons=old["buttons"],
+                buttons=bound_btns,
                 workspace_id=ws_id,
                 media_type=media_type,
                 photo_file_id=old.get("photo_file_id") or "",
+                vote_counts=vote_counts,
+                old_set_id=old_set_id,
             )
             await query.answer("✅ تغییرات روی پیام کانال/گروه اعمال شد!", show_alert=True)
             return await _render_old_panel(context, chat_id, old, message_id=msg_id)
@@ -720,7 +763,7 @@ async def handle_old_edit_callback(
             return OLD_PANEL
 
         media_type = old.get("media_type") or "none"
-        old["buttons"] = _bind_old_popups(ws_db, old.get("buttons") or [])
+        bound_btns, old_set_id, vote_counts = _prepare_old_buttons_for_publish(ws_db, old)
         try:
             await context.bot.delete_message(
                 chat_id=old["chat_id"],
@@ -738,10 +781,12 @@ async def handle_old_edit_callback(
                 photo_url=old.get("photo_url") or "",
                 show_above_text=bool(old.get("show_above_text", True)),
                 prefer_large_media=bool(old.get("prefer_large_media", True)),
-                buttons=old["buttons"],
+                buttons=bound_btns,
                 workspace_id=ws_id,
                 media_type=media_type,
                 photo_file_id=old.get("photo_file_id") or "",
+                vote_counts=vote_counts,
+                old_set_id=old_set_id,
             )
         except TelegramError as exc:
             await query.answer(f"❌ ارسال مجدد ناموفق: {exc}", show_alert=True)
@@ -885,7 +930,13 @@ async def receive_old_btn_text(
     if not old.get("chat_id"):
         return ConversationHandler.END
 
-    default_label = ws_db.get_default_button_text()
+    btn_type = old.get("pending_btn_type") or "url"
+    if btn_type == "like":
+        default_label = DEFAULT_LIKE_TEXT
+    elif btn_type == "vote":
+        default_label = DEFAULT_VOTE_TEXT
+    else:
+        default_label = ws_db.get_default_button_text()
     raw = (getattr(message, "text", None) or "").strip()
     label = default_label if raw == "-" else raw
     if not 1 <= len(label) <= MAX_BUTTON_TEXT_LENGTH:
@@ -896,8 +947,29 @@ async def receive_old_btn_text(
         register_panel_message(context, sent.message_id)
         return OLD_ADD_BTN_TEXT
 
+    if btn_type in ("like", "vote"):
+        old.pop("pending_btn_type", None)
+        old.pop("pending_btn_label", None)
+        buttons = normalize_buttons(old.get("buttons") or [])
+        next_row = max((b["row"] for b in buttons), default=-1) + 1
+        buttons.append(
+            {
+                "text": label,
+                "type": btn_type,
+                "style": None,
+                "row": next_row,
+            }
+        )
+        old["buttons"] = normalize_buttons(buttons)
+        try:
+            await message.delete()
+        except TelegramError:
+            pass
+        return await _show_old_buttons_manager(
+            context, message.chat_id, old, message_id=old.get("panel_msg_id")
+        )
+
     old["pending_btn_label"] = label
-    btn_type = old.get("pending_btn_type") or "url"
     try:
         await message.delete()
     except TelegramError:

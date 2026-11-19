@@ -28,7 +28,7 @@ def build_buttons_overview_text(
             [
                 "",
                 "هنوز دکمه‌ای اضافه نشده است.",
-                "با «➕ افزودن دکمه جدید» می‌توانید دکمهٔ لینکدار، نمایشی (پاپ‌آپ) یا کپی متن بسازید.",
+                "با «➕ افزودن دکمه جدید» می‌توانید دکمهٔ لینکدار، نمایشی (پاپ‌آپ)، کپی متن، لایک (شمارنده) یا نظرسنجی بسازید.",
             ]
         )
         return "\n".join(lines)
@@ -79,6 +79,10 @@ def build_button_inspector_text(
         val_line = f"• لینک: {html.escape(b.get('url') or '')}"
     elif btn_type == "popup":
         val_line = f"• متن پاپ‌آپ: «{html.escape(b.get('popup_text') or '')}»"
+    elif btn_type == "like":
+        val_line = "• رفتار: شمارندهٔ لایک/واکنش (هر عضو با کلیک اول +۱ و با کلیک مجدد -۱)"
+    elif btn_type == "vote":
+        val_line = "• رفتار: گزینهٔ نظرسنجی تک‌انتخابی (هر عضو فقط ۱ رأی روی این پست دارد)"
     else:
         val_line = f"• متن کپی: «{html.escape(b.get('copy_text') or '')}»"
 

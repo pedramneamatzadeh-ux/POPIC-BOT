@@ -119,7 +119,7 @@ class ButtonTests(unittest.TestCase):
 
         pv_kb = post_preview_controls_keyboard(True, True, 0)
         self.assertEqual(pv_kb.inline_keyboard[0][0].style, "success")
-        self.assertEqual(pv_kb.inline_keyboard[0][1].style, "primary")
+        self.assertEqual(pv_kb.inline_keyboard[0][1].style, "success")
         self.assertEqual(pv_kb.inline_keyboard[0][1].callback_data, "pb:targets")
         self.assertEqual(pv_kb.inline_keyboard[0][1].text, "🎯 انتخاب مقصد")
         pv_texts = [b.text for row in pv_kb.inline_keyboard for b in row]
@@ -150,6 +150,13 @@ class ButtonTests(unittest.TestCase):
         all_callbacks = [b.callback_data for row in pm_kb.inline_keyboard for b in row]
         self.assertIn("pm:btns:7", all_callbacks)
         self.assertIn("pm:media_menu:7", all_callbacks)
+        self.assertIn("pm:targets:7", all_callbacks)
+        self.assertIn("pm:save_back:7", all_callbacks)
+        self.assertNotIn("pm:pv:7", all_callbacks)
+        self.assertEqual(pm_kb.inline_keyboard[0][1].style, "success")
+        self.assertEqual(pm_kb.inline_keyboard[0][1].text, "🎯 انتخاب مقصد")
+        self.assertEqual(pm_kb.inline_keyboard[-2][0].style, "success")
+        self.assertEqual(pm_kb.inline_keyboard[-2][0].text, "✅ ذخیره و بازگشت")
 
         pm_none_kb = post_manage_detail_keyboard({"id": 8, "media_type": "none"}, buttons_count=0)
         pm_none_cbs = [b.callback_data for row in pm_none_kb.inline_keyboard for b in row]
@@ -176,6 +183,9 @@ class ButtonTests(unittest.TestCase):
         self.assertEqual(type_kb.inline_keyboard[0][0].callback_data, "pb:btn_type:url")
         self.assertEqual(type_kb.inline_keyboard[1][0].callback_data, "pb:btn_type:popup")
         self.assertEqual(type_kb.inline_keyboard[2][0].callback_data, "pb:btn_type:copy")
+        self.assertEqual(type_kb.inline_keyboard[3][0].callback_data, "pb:btn_type:like")
+        self.assertEqual(type_kb.inline_keyboard[3][0].style, "success")
+        self.assertEqual(type_kb.inline_keyboard[4][0].callback_data, "pb:btn_type:vote")
 
         insp_kb = post_button_inspector_keyboard(
             [

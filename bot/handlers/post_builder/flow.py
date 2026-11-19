@@ -9,7 +9,9 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ...constants import (
+    DEFAULT_LIKE_TEXT,
     DEFAULT_POPUP_TEXT,
+    DEFAULT_VOTE_TEXT,
     MAX_BUTTON_TEXT_LENGTH,
     MAX_CAPTION_LENGTH,
     MAX_COPY_TEXT_LENGTH,
@@ -1014,15 +1016,27 @@ async def handle_preview_callback(
 
     if data.startswith("pb:btn_type:"):
         btn_type = data.split(":", 2)[2]
-        if btn_type not in ("url", "popup", "copy"):
+        if btn_type not in ("url", "popup", "copy", "like", "vote"):
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return POST_PREVIEW
         pb["pending_btn_type"] = btn_type
         pb["ctrl_msg_id"] = ctrl_mid
         await query.answer()
+        if btn_type == "like":
+            prompt_text = Msg.POST_ASK_BTN_LIKE.format(default_like=DEFAULT_LIKE_TEXT)
+            pmode = "HTML"
+        elif btn_type == "vote":
+            prompt_text = Msg.POST_ASK_BTN_VOTE.format(default_vote=DEFAULT_VOTE_TEXT)
+            pmode = "HTML"
+        else:
+            prompt_text = Msg.POST_ASK_BTN_TEXT.format(
+                default=ws_db.get_default_button_text()
+            )
+            pmode = None
         await query.edit_message_text(
-            Msg.POST_ASK_BTN_TEXT.format(default=ws_db.get_default_button_text()),
+            prompt_text,
             reply_markup=input_back_keyboard("pb:btn_add"),
+            parse_mode=pmode,
         )
         return POST_ADD_BTN_TEXT
 
@@ -1130,8 +1144,23 @@ async def handle_preview_callback(
         idx = int(parts[2])
         btn_type = parts[3]
         buttons = normalize_buttons(pb.get("buttons") or [])
-        if not 0 <= idx < len(buttons) or btn_type not in ("url", "popup", "copy"):
+        if not 0 <= idx < len(buttons) or btn_type not in ("url", "popup", "copy", "like", "vote"):
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
+            return POST_PREVIEW
+        if btn_type in ("like", "vote"):
+            cur = buttons[idx]
+            cur.pop("url", None)
+            cur.pop("popup_text", None)
+            cur.pop("copy_text", None)
+            cur["type"] = btn_type
+            pb["buttons"] = normalize_buttons(buttons)
+            if pb.get("post_id"):
+                ws_db.update_post(
+                    pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
+                )
+            await sync_preview_buttons(context, chat_id, pb)
+            await query.answer("✅ نوع دکمه تغییر کرد.")
+            await _show_button_inspector(context, chat_id, pb, idx, message_id=ctrl_mid)
             return POST_PREVIEW
         pb["editing_btn_idx"] = idx
         pb["editing_btn_type"] = btn_type
@@ -1312,7 +1341,13 @@ async def receive_btn_text(
     if not pb:
         return ConversationHandler.END
 
-    default_label = ws_db.get_default_button_text()
+    btn_type = pb.get("pending_btn_type") or "url"
+    if btn_type == "like":
+        default_label = DEFAULT_LIKE_TEXT
+    elif btn_type == "vote":
+        default_label = DEFAULT_VOTE_TEXT
+    else:
+        default_label = ws_db.get_default_button_text()
     raw = (message.text or "").strip()
     label = default_label if raw == "-" else raw
     if not 1 <= len(label) <= MAX_BUTTON_TEXT_LENGTH:
@@ -1322,8 +1357,30 @@ async def receive_btn_text(
         )
         return POST_ADD_BTN_TEXT
 
+    if btn_type in ("like", "vote"):
+        pb.pop("pending_btn_type", None)
+        pb.pop("pending_btn_label", None)
+        buttons = normalize_buttons(pb.get("buttons") or [])
+        next_row = max((b["row"] for b in buttons), default=-1) + 1
+        buttons.append(
+            {
+                "text": label,
+                "type": btn_type,
+                "style": None,
+                "row": next_row,
+            }
+        )
+        pb["buttons"] = normalize_buttons(buttons)
+        if pb.get("post_id"):
+            ws_db.update_post(
+                pb["post_id"], buttons_json=serialize_buttons(pb["buttons"])
+            )
+        await delete_answer_message(context, message)
+        await sync_preview_buttons(context, message.chat_id, pb)
+        await _show_buttons_manager(context, message.chat_id, pb)
+        return POST_PREVIEW
+
     pb["pending_btn_label"] = label
-    btn_type = pb.get("pending_btn_type") or "url"
     await delete_answer_message(context, message)
     ctrl_mid = pb.get("ctrl_msg_id")
     prompt = _value_prompt_for_type(btn_type, label)

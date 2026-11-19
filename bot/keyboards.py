@@ -267,7 +267,7 @@ def post_preview_controls_keyboard(
     rows = [
         [
             ib("📤 ارسال به کانال", callback_data="pb:send_ch", style="success"),
-            ib("🎯 انتخاب مقصد", callback_data="pb:targets", style="primary"),
+            ib("🎯 انتخاب مقصد", callback_data="pb:targets", style="success"),
         ],
     ]
     if media_type == "link":
@@ -489,6 +489,8 @@ def post_button_type_keyboard(
             [ib("🔗 دکمه لینکدار (URL)", callback_data=f"{select_prefix}url", style="primary")],
             [ib("💬 دکمه نمایشی (پاپ‌آپ بدون لینک)", callback_data=f"{select_prefix}popup", style="primary")],
             [ib("📋 دکمه کپی متن", callback_data=f"{select_prefix}copy", style="primary")],
+            [ib("❤️ دکمه لایک / شمارنده واکنش", callback_data=f"{select_prefix}like", style="success")],
+            [ib("📊 دکمه نظرسنجی (تک‌انتخابی)", callback_data=f"{select_prefix}vote", style="primary")],
             [ib("◀️ بازگشت", callback_data=back_callback, style="danger")],
         ]
     )
@@ -665,7 +667,7 @@ def post_manage_detail_keyboard(
 
     send_row = [
         ib("📤 ارسال به کانال/گروه", callback_data=f"pm:send_ch:{post_id}", style="success"),
-        ib("📥 تحویل در پی‌وی", callback_data=f"pm:pv:{post_id}", style="success"),
+        ib("🎯 انتخاب مقصد", callback_data=f"pm:targets:{post_id}", style="success"),
     ]
 
     rows: List[List[InlineKeyboardButton]] = [send_row]
@@ -708,6 +710,11 @@ def post_manage_detail_keyboard(
                 ),
             ]
         )
+    rows.append(
+        [
+            ib("✅ ذخیره و بازگشت", callback_data=f"pm:save_back:{post_id}", style="success"),
+        ]
+    )
     rows.append(
         [
             ib("🗑 حذف پست", callback_data=f"pm:del:{post_id}", style="danger"),
