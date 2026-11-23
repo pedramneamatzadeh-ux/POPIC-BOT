@@ -251,6 +251,7 @@ def post_preview_controls_keyboard(
     prefer_large_media: bool,
     extra_buttons_count: int = 0,
     media_type: str = "link",
+    is_scheduled: bool = False,
 ) -> InlineKeyboardMarkup:
     pos_label = (
         "⬆️ پیش‌نمایش: بالای متن" if show_above_text else "⬇️ پیش‌نمایش: پایین متن"
@@ -287,10 +288,18 @@ def post_preview_controls_keyboard(
                 ib("✏️ ویرایش متن", callback_data="pb:edit_text", style="primary"),
                 ib("🖼 تغییر عکس / حالت", callback_data="pb:change_media", style="primary"),
             ],
+        ]
+    )
+    if is_scheduled:
+        rows.append(
             [
-                ib("✅ ذخیره و منوی اصلی", callback_data="pb:done", style="success"),
-                ib("❌ لغو", callback_data="cancel_prompt", style="danger"),
-            ],
+                ib("🗑 حذف زمان‌بندی", callback_data="pb:sched_clear", style="danger"),
+            ]
+        )
+    rows.append(
+        [
+            ib("✅ ذخیره و منوی اصلی", callback_data="pb:done", style="success"),
+            ib("❌ لغو", callback_data="cancel_prompt", style="danger"),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -568,6 +577,8 @@ def post_manage_list_keyboard(
     tab: str = "all",
     all_count: Optional[int] = None,
     sched_count: Optional[int] = None,
+    draft_count: Optional[int] = None,
+    pub_count: Optional[int] = None,
     search_query: str = "",
 ) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
@@ -622,6 +633,16 @@ def post_manage_list_keyboard(
         if sched_count is not None
         else "⏰ زمان‌بندی‌شده"
     )
+    draft_lbl = (
+        f"📝 پیش‌نویس ({draft_count})"
+        if draft_count is not None
+        else "📝 پیش‌نویس"
+    )
+    pub_lbl = (
+        f"✅ منتشرشده ({pub_count})"
+        if pub_count is not None
+        else "✅ منتشرشده"
+    )
     rows.append(
         [
             ib(
@@ -633,6 +654,20 @@ def post_manage_list_keyboard(
                 f"{'✓ ' if tab == 'sched' else ''}{sched_lbl}",
                 callback_data="pm:tab:sched",
                 style="success" if tab == "sched" else "primary",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            ib(
+                f"{'✓ ' if tab == 'draft' else ''}{draft_lbl}",
+                callback_data="pm:tab:draft",
+                style="success" if tab == "draft" else "primary",
+            ),
+            ib(
+                f"{'✓ ' if tab == 'pub' else ''}{pub_lbl}",
+                callback_data="pm:tab:pub",
+                style="success" if tab == "pub" else "primary",
             ),
         ]
     )
@@ -707,6 +742,19 @@ def post_manage_detail_keyboard(
                     "🖼 اندازه پیش‌نمایش",
                     callback_data=f"pm:toggle_size:{post_id}",
                     style="primary",
+                ),
+            ]
+        )
+    is_scheduled = (post.get("schedule_status") == "pending") and bool(
+        post.get("scheduled_at")
+    )
+    if is_scheduled:
+        rows.append(
+            [
+                ib(
+                    "🗑 حذف زمان‌بندی",
+                    callback_data=f"pm:sched_clear:{post_id}",
+                    style="danger",
                 ),
             ]
         )

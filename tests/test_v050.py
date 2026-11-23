@@ -887,12 +887,13 @@ class V050Tests(unittest.TestCase):
             self.assertEqual(len(post_rows_p0), 5)
             self.assertIn("صفحه 1 از 3", bot.sent_messages[-1]["text"])
 
-            # Verify bottom ordering: first 5 rows are posts, then pagination, then tabs, then search, then home
+            # Verify bottom ordering: first 5 rows are posts, then pagination, then 4 tabs (2 rows), then search, then home
             self.assertTrue(all(kb_all_p0[i][0].callback_data.startswith("pm:detail:") for i in range(5)))
             self.assertTrue(any(b.callback_data.startswith("pm:page:") for b in kb_all_p0[5]))
             self.assertEqual([b.callback_data for b in kb_all_p0[6]], ["pm:tab:all", "pm:tab:sched"])
-            self.assertEqual([b.callback_data for b in kb_all_p0[7]], ["pm:search"])
-            self.assertEqual([b.callback_data for b in kb_all_p0[8]], ["pm:close"])
+            self.assertEqual([b.callback_data for b in kb_all_p0[7]], ["pm:tab:draft", "pm:tab:pub"])
+            self.assertEqual([b.callback_data for b in kb_all_p0[8]], ["pm:search"])
+            self.assertEqual([b.callback_data for b in kb_all_p0[9]], ["pm:close"])
 
             # 2) "Scheduled" tab shows 1 day per page WITHOUT the 5-post limit:
             # Page 0 -> 2099-12-23 (5 posts); Page 1 -> 2099-12-25 (all 6 posts on 1 page!)
@@ -916,7 +917,8 @@ class V050Tests(unittest.TestCase):
             self.assertIn("2099-12-25", bot.edited_messages[-1]["text"])
             self.assertIn("صفحه 2 از 2", bot.edited_messages[-1]["text"])
             # Tabs and search remain below the 6 daily posts + pagination
-            self.assertEqual([b.callback_data for b in kb_s1[-3]], ["pm:tab:all", "pm:tab:sched"])
+            self.assertEqual([b.callback_data for b in kb_s1[-4]], ["pm:tab:all", "pm:tab:sched"])
+            self.assertEqual([b.callback_data for b in kb_s1[-3]], ["pm:tab:draft", "pm:tab:pub"])
             self.assertEqual([b.callback_data for b in kb_s1[-2]], ["pm:search"])
             self.assertEqual([b.callback_data for b in kb_s1[-1]], ["pm:close"])
 

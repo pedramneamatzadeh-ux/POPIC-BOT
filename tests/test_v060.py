@@ -146,7 +146,7 @@ class V060Tests(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_saved_post_detail_targets_and_save_back_and_wider_list_text(self) -> None:
-        self.assertEqual(BOT_VERSION, "0.6.0")
+        self.assertEqual(BOT_VERSION, "0.6.1")
 
         # 1) Green target picker in new post preview & saved post detail + save_back
         pv_kb = post_preview_controls_keyboard(True, True, 0)
@@ -167,9 +167,12 @@ class V060Tests(unittest.IsolatedAsyncioTestCase):
             pages=2,
             all_count=7,
             sched_count=2,
+            draft_count=3,
+            pub_count=2,
         )
         self.assertIn("مدیریت و آرشیو پست‌های ذخیره‌شده", txt)
-        self.assertIn("کل پست‌ها", txt)
+        self.assertIn("پیش‌نویس", txt)
+        self.assertIn("منتشرشده", txt)
         self.assertGreaterEqual(max(len(line) for line in txt.splitlines()), 45)
 
         # 3) Selecting targets in saved post detail and saving back
@@ -432,6 +435,141 @@ class V060Tests(unittest.IsolatedAsyncioTestCase):
             _make_ctx(bot),
         )
         self.assertEqual(self.ws_db.get_vote_counts("old", old_set_id).get(old_bid), 1)
+
+    async def test_v061_delete_schedule_buttons_and_draft_published_tabs(self) -> None:
+        # 1) Red delete-schedule button appears above bottom save/back row ONLY when scheduled
+        pv_unsched = post_preview_controls_keyboard(True, True, 0, is_scheduled=False)
+        self.assertNotIn(
+            "pb:sched_clear",
+            [b.callback_data for r in pv_unsched.inline_keyboard for b in r],
+        )
+
+        pv_sched = post_preview_controls_keyboard(True, True, 0, is_scheduled=True)
+        self.assertEqual(pv_sched.inline_keyboard[-2][0].callback_data, "pb:sched_clear")
+        self.assertEqual(pv_sched.inline_keyboard[-2][0].style, "danger")
+        self.assertEqual(pv_sched.inline_keyboard[-1][0].callback_data, "pb:done")
+
+        pm_unsched = post_manage_detail_keyboard({"id": 9, "schedule_status": ""})
+        self.assertNotIn(
+            "pm:sched_clear:9",
+            [b.callback_data for r in pm_unsched.inline_keyboard for b in r],
+        )
+
+        pm_sched = post_manage_detail_keyboard(
+            {"id": 9, "schedule_status": "pending", "scheduled_at": "2099-05-01T10:00:00Z"}
+        )
+        self.assertEqual(pm_sched.inline_keyboard[-3][0].callback_data, "pm:sched_clear:9")
+        self.assertEqual(pm_sched.inline_keyboard[-3][0].style, "danger")
+        self.assertEqual(pm_sched.inline_keyboard[-2][0].callback_data, "pm:save_back:9")
+
+        # 2) Clicking pb:sched_clear in post_builder clears schedule and removes red button
+        bot = _FakeBot()
+        pb = {
+            "title": "زمان‌بندی",
+            "text": "پست زمان‌بندی‌شده",
+            "entities_json": "[]",
+            "media_type": "none",
+            "photo_url": "",
+            "photo_file_id": "",
+            "show_above_text": True,
+            "prefer_large_media": True,
+            "buttons": [],
+            "target_chat_ids": [-100111],
+            "target_names": ["کانال اول"],
+            "scheduled_at": "2099-05-01T10:00:00Z",
+        }
+        pb_ctx = _make_ctx(bot, {"pb": pb})
+        q_pb_clear = _FakeQuery("pb:sched_clear")
+        st_pb = await handle_preview_callback(
+            SimpleNamespace(callback_query=q_pb_clear, effective_user=_user(1000)),
+            pb_ctx,
+        )
+        self.assertEqual(st_pb, POST_PREVIEW)
+        self.assertIsNone(pb["scheduled_at"])
+        self.assertNotIn(
+            "pb:sched_clear",
+            [b.callback_data for r in q_pb_clear.message.reply_markup.inline_keyboard for b in r],
+        )
+
+        # 3) Creating draft, scheduled, and published posts & testing pm:sched_clear + 4 tabs
+        p_draft1 = self.ws_db.create_post(
+            post_text="متن پیش‌نویس اول",
+            entities_json="[]",
+            photo_url="",
+            media_type="none",
+            title="پیش‌نویس آلفا",
+            created_by=1000,
+        )
+        p_draft2 = self.ws_db.create_post(
+            post_text="متن پیش‌نویس دوم",
+            entities_json="[]",
+            photo_url="",
+            media_type="none",
+            title="پیش‌نویس بتا",
+            created_by=1000,
+        )
+        p_sched = self.ws_db.create_post(
+            post_text="متن زمان‌بندی",
+            entities_json="[]",
+            photo_url="",
+            media_type="none",
+            title="پست زمان‌بندی",
+            created_by=1000,
+        )
+        self.ws_db.set_post_schedule(p_sched, "2099-06-01T12:00:00Z", [-100111])
+
+        p_pub = self.ws_db.create_post(
+            post_text="متن منتشرشده",
+            entities_json="[]",
+            photo_url="",
+            media_type="none",
+            title="پست منتشرشده",
+            created_by=1000,
+        )
+        self.ws_db.mark_post_published(p_pub, -100111, 77, "کانال اول", "ch1")
+
+        pm_ctx = _make_ctx(bot, {"pm": {"page": 0, "tab": "all", "search": ""}})
+
+        # Switch to draft tab -> only p_draft1 & p_draft2
+        await handle_post_manage_callback(
+            SimpleNamespace(callback_query=_FakeQuery("pm:tab:draft"), effective_user=_user(1000)),
+            pm_ctx,
+        )
+        draft_cbs = [
+            r[0].callback_data
+            for r in bot.edited_messages[-1]["reply_markup"].inline_keyboard
+            if r[0].callback_data.startswith("pm:detail:")
+        ]
+        self.assertEqual(draft_cbs, [f"pm:detail:{p_draft2}", f"pm:detail:{p_draft1}"])
+
+        # Switch to published tab -> only p_pub
+        await handle_post_manage_callback(
+            SimpleNamespace(callback_query=_FakeQuery("pm:tab:pub"), effective_user=_user(1000)),
+            pm_ctx,
+        )
+        pub_cbs = [
+            r[0].callback_data
+            for r in bot.edited_messages[-1]["reply_markup"].inline_keyboard
+            if r[0].callback_data.startswith("pm:detail:")
+        ]
+        self.assertEqual(pub_cbs, [f"pm:detail:{p_pub}"])
+
+        # Clear schedule on p_sched via pm:sched_clear:<post_id> -> moves from sched to draft
+        await handle_post_manage_callback(
+            SimpleNamespace(
+                callback_query=_FakeQuery(f"pm:sched_clear:{p_sched}"),
+                effective_user=_user(1000),
+            ),
+            pm_ctx,
+        )
+        self.assertEqual(self.ws_db.get_post(p_sched)["schedule_status"], "")
+        self.assertNotIn(
+            f"pm:sched_clear:{p_sched}",
+            [b.callback_data for r in bot.edited_messages[-1]["reply_markup"].inline_keyboard for b in r],
+        )
+        self.assertEqual(self.ws_db.count_pending_scheduled_posts(), 0)
+        self.assertEqual(self.ws_db.count_filtered_posts("draft"), 3)
+        self.assertEqual(self.ws_db.count_filtered_posts("pub"), 1)
 
 
 async def _noop(*args, **kwargs):
