@@ -120,6 +120,8 @@ def _list_text(
     day_count: int = 0,
     all_count: Optional[int] = None,
     sched_count: Optional[int] = None,
+    draft_count: Optional[int] = None,
+    pub_count: Optional[int] = None,
 ) -> str:
     q_note = (
         f"\n🔍 فیلتر جست‌وجوی فعال: «<code>{html.escape(search_query)}</code>»"
@@ -128,9 +130,13 @@ def _list_text(
     )
     summary_parts = []
     if all_count is not None:
-        summary_parts.append(f"کل پست‌ها: <b>{all_count}</b> مورد")
+        summary_parts.append(f"کل: <b>{all_count}</b>")
     if sched_count is not None:
-        summary_parts.append(f"در صف زمان‌بندی: <b>{sched_count}</b> مورد")
+        summary_parts.append(f"زمان‌بندی: <b>{sched_count}</b>")
+    if draft_count is not None:
+        summary_parts.append(f"پیش‌نویس: <b>{draft_count}</b>")
+    if pub_count is not None:
+        summary_parts.append(f"منتشرشده: <b>{pub_count}</b>")
     summary_line = ("📊 " + "  |  ".join(summary_parts)) if summary_parts else ""
 
     guide_block = (
@@ -166,10 +172,20 @@ def _list_text(
         )
         return "\n".join(lines)
 
+    tab_titles = {
+        "all": "📂 <b>مدیریت و آرشیو پست‌های ذخیره‌شده</b>",
+        "draft": "📝 <b>پست‌های پیش‌نویس</b>",
+        "pub": "✅ <b>پست‌های منتشرشده</b>",
+    }
+    empty_msgs = {
+        "all": "هنوز هیچ پستی در این فضای کاری ذخیره نشده است؛ از منوی اصلی «📝 ساخت پست جدید» را بزنید.",
+        "draft": "در حال حاضر هیچ پست پیش‌نویسی وجود ندارد.",
+        "pub": "هنوز هیچ پستی در کانال‌ها یا گروه‌ها منتشر نشده است.",
+    }
+    header = tab_titles.get(tab, tab_titles["all"])
+
     if total == 0:
-        lines = [
-            f"📂 <b>مدیریت و آرشیو پست‌های ذخیره‌شده</b>{q_note}",
-        ]
+        lines = [f"{header}{q_note}"]
         if summary_line:
             lines.append(summary_line)
         lines.extend(
@@ -177,14 +193,12 @@ def _list_text(
                 "",
                 "نتیجه‌ای برای عبارت جست‌وجوشده پیدا نشد."
                 if search_query
-                else "هنوز هیچ پستی در این فضای کاری ذخیره نشده است؛ از منوی اصلی «📝 ساخت پست جدید» را بزنید.",
+                else empty_msgs.get(tab, empty_msgs["all"]),
             ]
         )
         return "\n".join(lines)
 
-    lines = [
-        f"📂 <b>مدیریت و آرشیو پست‌های ذخیره‌شده</b> ({total} پست){q_note}",
-    ]
+    lines = [f"{header} ({total} پست){q_note}"]
     if summary_line:
         lines.append(summary_line)
     lines.extend(
@@ -380,6 +394,8 @@ async def _render_list(
     )
     sched_all = ws_db.list_pending_scheduled_posts(search_query=search_query)
     sched_count = len(sched_all)
+    draft_count = ws_db.count_filtered_posts("draft", search_query=search_query)
+    pub_count = ws_db.count_filtered_posts("pub", search_query=search_query)
 
     if tab == "sched":
         groups = _group_scheduled_by_day(sched_all)
@@ -401,24 +417,32 @@ async def _render_list(
             day_count=len(day_posts),
             all_count=all_count,
             sched_count=sched_count,
+            draft_count=draft_count,
+            pub_count=pub_count,
         )
     else:
-        pages = total_pages(all_count, config.PAGE_SIZE)
+        tab_total = (
+            draft_count if tab == "draft" else (pub_count if tab == "pub" else all_count)
+        )
+        pages = total_pages(tab_total, config.PAGE_SIZE)
         page = max(0, min(page, pages - 1))
         offset = page * config.PAGE_SIZE
-        posts = (
-            ws_db.search_posts(search_query, limit=config.PAGE_SIZE, offset=offset)
-            if search_query
-            else ws_db.list_posts(limit=config.PAGE_SIZE, offset=offset)
+        posts = ws_db.list_filtered_posts(
+            status_filter=tab,
+            search_query=search_query,
+            limit=config.PAGE_SIZE,
+            offset=offset,
         )
         text = _list_text(
-            tab="all",
-            total=all_count,
+            tab=tab,
+            total=tab_total,
             page=page,
             pages=pages,
             search_query=search_query,
             all_count=all_count,
             sched_count=sched_count,
+            draft_count=draft_count,
+            pub_count=pub_count,
         )
 
     pm["page"] = page
@@ -434,6 +458,8 @@ async def _render_list(
             tab=tab,
             all_count=all_count,
             sched_count=sched_count,
+            draft_count=draft_count,
+            pub_count=pub_count,
             search_query=search_query,
         ),
         message_id=message_id,
@@ -797,7 +823,7 @@ async def handle_post_manage_callback(
 
     if data.startswith("pm:tab:"):
         tab = data.split(":", 2)[2]
-        if tab not in ("all", "sched"):
+        if tab not in ("all", "sched", "draft", "pub"):
             await query.answer(Msg.INVALID_COMMAND, show_alert=True)
             return PM_LIST
         pm["tab"] = tab
@@ -880,6 +906,19 @@ async def handle_post_manage_callback(
             existing_utc_iso=existing_utc,
         )
         return PM_SCHED_PANEL
+
+    if data.startswith("pm:sched_clear:"):
+        raw = data.split(":", 2)[2]
+        post = ws_db.get_post(int(raw)) if raw.isdigit() else None
+        if not post:
+            await query.answer("❌ پست پیدا نشد.", show_alert=True)
+            return PM_LIST
+        ws_db.clear_post_schedule(post["id"])
+        pm.pop("_sched", None)
+        await query.answer("🗑 زمان‌بندی پست حذف شد.")
+        return await _render_detail(
+            context, ws_db, chat_id, post["id"], message_id=msg_id, refresh_preview=False
+        )
 
     if data.startswith("pm:sched_"):
         post_id = pm.get("post_id")

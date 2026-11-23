@@ -131,6 +131,63 @@ class PostsMixin:
                 ).fetchone()[0]
             )
 
+    @staticmethod
+    def _filtered_posts_where(
+        status_filter: str = "all",
+        search_query: str = "",
+    ) -> tuple[str, List[Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if status_filter == "pub":
+            clauses.append("status = 'published'")
+        elif status_filter == "draft":
+            clauses.append("COALESCE(status, 'draft') != 'published'")
+            clauses.append(
+                "NOT (COALESCE(schedule_status, '') = 'pending' AND scheduled_at IS NOT NULL)"
+            )
+        q = (search_query or "").strip()
+        if q:
+            pattern = f"%{q}%"
+            clauses.append("(title LIKE ? COLLATE NOCASE OR post_text LIKE ? COLLATE NOCASE)")
+            params.extend([pattern, pattern])
+        where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where_sql, params
+
+    def list_filtered_posts(
+        self,
+        status_filter: str = "all",
+        search_query: str = "",
+        limit: int = 5,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        where_sql, params = self._filtered_posts_where(status_filter, search_query)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM posts
+                {where_sql}
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, int(limit), int(offset)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_filtered_posts(
+        self,
+        status_filter: str = "all",
+        search_query: str = "",
+    ) -> int:
+        where_sql, params = self._filtered_posts_where(status_filter, search_query)
+        with self.connect() as connection:
+            return int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM posts {where_sql}",
+                    params,
+                ).fetchone()[0]
+            )
+
     def list_pending_scheduled_posts(
         self,
         search_query: str = "",

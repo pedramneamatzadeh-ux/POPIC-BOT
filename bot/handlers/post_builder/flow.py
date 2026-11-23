@@ -523,6 +523,7 @@ async def handle_media_choice_callback(
                 prefer_large_media=pb["prefer_large_media"],
                 extra_buttons_count=len(pb.get("buttons") or []),
                 media_type=pb.get("media_type") or "link",
+                is_scheduled=bool(pb.get("scheduled_at")),
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -937,6 +938,28 @@ async def handle_preview_callback(
                 prefer_large_media=pb["prefer_large_media"],
                 extra_buttons_count=len(pb.get("buttons") or []),
                 media_type=pb.get("media_type") or "link",
+                is_scheduled=bool(pb.get("scheduled_at")),
+            ),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return POST_PREVIEW
+
+    if data == "pb:sched_clear":
+        if pb.get("post_id"):
+            ws_db.clear_post_schedule(pb["post_id"])
+        pb["scheduled_at"] = None
+        if isinstance(pb.get("_sched"), dict):
+            pb["_sched"]["has_existing"] = False
+        await query.answer("🗑 زمان‌بندی پست حذف شد.")
+        await query.edit_message_text(
+            build_control_summary(pb),
+            reply_markup=post_preview_controls_keyboard(
+                show_above_text=pb["show_above_text"],
+                prefer_large_media=pb["prefer_large_media"],
+                extra_buttons_count=len(pb.get("buttons") or []),
+                media_type=pb.get("media_type") or "link",
+                is_scheduled=False,
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -1202,6 +1225,7 @@ async def handle_preview_callback(
                 prefer_large_media=pb["prefer_large_media"],
                 extra_buttons_count=len(pb.get("buttons") or []),
                 media_type=pb.get("media_type") or "link",
+                is_scheduled=bool(pb.get("scheduled_at")),
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -1563,6 +1587,7 @@ async def handle_pb_schedule_callback(
                 prefer_large_media=pb["prefer_large_media"],
                 extra_buttons_count=len(pb.get("buttons") or []),
                 media_type=pb.get("media_type") or "link",
+                is_scheduled=bool(pb.get("scheduled_at")),
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,

@@ -198,6 +198,7 @@ async def send_or_refresh_preview(
             prefer_large_media=pb["prefer_large_media"],
             extra_buttons_count=len(pb.get("buttons") or []),
             media_type=media_type,
+            is_scheduled=bool(pb.get("scheduled_at")),
         ),
         parse_mode="HTML",
         disable_web_page_preview=True,
